@@ -12,7 +12,7 @@
     "wechat",
     "adapter"
   ],
-  "author": "TRSS-WeChat-OC-Plugin contributors",
+  "author": "@ethan42nd @misaka20002",
   "license": "MIT",
   "dependencies": {
     "node-fetch": "^3.0.0",

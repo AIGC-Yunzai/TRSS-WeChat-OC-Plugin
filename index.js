@@ -5,11 +5,16 @@ import fetch from "node-fetch"
 import crypto from "crypto"
 import fs from "fs"
 import path from "path"
-import { fileURLToPath } from "url"
 import QRCode from "qrcode"
+import plugin from '../../lib/plugins/plugin.js'
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
+// 更新用
+import { createRequire } from 'module'
+import _ from 'lodash'
+import { Restart } from '../other/restart.js'
+const require = createRequire(import.meta.url)
+const { exec, execSync } = require('child_process')
+let uping = false
 
 // 默认配置
 const { config, configSave } = await makeConfig("WeixinOC", {
@@ -833,13 +838,13 @@ const adapter = new class WeixinOCAdapter {
       get pickUser() { return this.pickFriend },
 
       fl: new Map(),
-      gl: new Map(),  // 微信个人号没有群组
+      gl: new Map(),
       gml: new Map(),
 
       _stop: false,
     }
 
-    // 关键修复：注册到 Bot.bots，供 prepareEvent 使用
+    // 注册到 Bot.bots，供 prepareEvent 使用
     Bot.bots[id] = Bot[id]
     this.bots.set(id, Bot[id])
 
@@ -1023,6 +1028,10 @@ export class WeixinOC extends plugin {
           fnc: "Remove",
           permission: config.permission,
         },
+        {
+          reg: /^#(微信个人号|WeChat(OC)?)((插件)?(强制)?更新| update)(\s*(master|dev|DEV|main|MAIN))?$/i,
+          fnc: 'update'
+        }
       ],
     })
   }
@@ -1082,9 +1091,288 @@ export class WeixinOC extends plugin {
 
     this.reply("未找到指定账号，请使用 #微信列表 查看", true)
   }
+
+  /**
+   * rule - 更新微信个人号插件
+   * @returns
+   */
+  async update() {
+    if (!this.e.isMaster) return false
+
+    /** 检查是否正在更新中 */
+    if (uping) {
+      await this.reply('已有命令更新中..请勿重复操作')
+      return
+    }
+
+    /** 检查git安装 */
+    if (!(await this.checkGit())) return
+
+    const isForce = this.e.msg.includes('强制')
+    // 检查是否为dev分支更新
+    const isDevUpdate = this.e.msg.includes('dev') || this.e.msg.includes('DEV')
+    // 检查是否为dev分支更新
+    const isMainUpdate = this.e.msg.includes('main') || this.e.msg.includes('MAIN') || this.e.msg.includes('master')
+
+    /** 执行更新 */
+    await this.runUpdate(isForce, isDevUpdate, isMainUpdate)
+
+    /** 是否需要重启 */
+    if (this.isUp) {
+      // await this.reply("更新完毕，请重启云崽后生效")
+      setTimeout(() => this.restart(), 2000)
+    }
+  }
+
+  restart() {
+    new Restart(this.e).restart()
+  }
+
+  /**
+   * 更新
+   * @param {boolean} isForce 是否为强制更新
+   * @param {boolean} isDevUpdate 是否为更新 dev
+   * @param {boolean} isMainUpdate 是否为更新 main
+   * @returns
+   */
+  async runUpdate(isForce, isDevUpdate, isMainUpdate) {
+    let command = ''
+
+    if (isForce && isDevUpdate) {
+      // dev分支强制更新
+      command = "git -C ./plugins/TRSS-WeChat-OC-Plugin/ config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*' && git -C ./plugins/TRSS-WeChat-OC-Plugin/ fetch origin && git -C ./plugins/TRSS-WeChat-OC-Plugin/ reset --hard HEAD && git -C ./plugins/TRSS-WeChat-OC-Plugin/ clean -fd && git -C ./plugins/TRSS-WeChat-OC-Plugin/ checkout dev && git -C ./plugins/TRSS-WeChat-OC-Plugin/ fetch --all && git -C ./plugins/TRSS-WeChat-OC-Plugin/ reset --hard origin/dev"
+      this.e.reply('正在执行dev分支强制更新操作，请稍等')
+    } else if (isForce && isMainUpdate) {
+      // main分支强制更新
+      // command = 'git -C ./plugins/TRSS-WeChat-OC-Plugin/ reset --hard HEAD && git -C ./plugins/TRSS-WeChat-OC-Plugin/ clean -fd && git -C ./plugins/TRSS-WeChat-OC-Plugin/ checkout main && git -C ./plugins/TRSS-WeChat-OC-Plugin/ fetch --all && git -C ./plugins/TRSS-WeChat-OC-Plugin/ reset --hard origin/main'
+      command = 'git -C ./plugins/TRSS-WeChat-OC-Plugin/ reset --hard HEAD && git -C ./plugins/TRSS-WeChat-OC-Plugin/ clean -fd && git -C ./plugins/TRSS-WeChat-OC-Plugin/ checkout master && git -C ./plugins/TRSS-WeChat-OC-Plugin/ fetch --all && git -C ./plugins/TRSS-WeChat-OC-Plugin/ reset --hard origin/master'
+      this.e.reply('正在执行 master 分支强制更新操作，请稍等')
+    } else if (isForce) {
+      command = `git -C ./plugins/TRSS-WeChat-OC-Plugin/ reset --hard HEAD && git -C ./plugins/TRSS-WeChat-OC-Plugin/ clean -fd && git -C ./plugins/TRSS-WeChat-OC-Plugin/ checkout . && git -C ./plugins/TRSS-WeChat-OC-Plugin/ fetch --all && git -C ./plugins/TRSS-WeChat-OC-Plugin/ reset --hard @{u}`
+      this.e.reply('正在执行强制更新操作，请稍等')
+    } else {
+      command = 'git -C ./plugins/TRSS-WeChat-OC-Plugin/ pull --no-rebase'
+      this.e.reply('正在执行更新操作，请稍等')
+    }
+    /** 获取上次提交的commitId，用于获取日志时判断新增的更新日志 */
+    this.oldCommitId = await this.getcommitId('TRSS-WeChat-OC-Plugin')
+    uping = true
+    let ret = await this.execSync(command)
+    uping = false
+
+    if (ret.error) {
+      logger.mark(`${this.e.logFnc} 更新失败：TRSS-WeChat-OC-Plugin`)
+      this.gitErr(ret.error, ret.stdout)
+      return false
+    }
+
+    /** 获取插件提交的最新时间 */
+    let time = await this.getTime('TRSS-WeChat-OC-Plugin')
+
+    if (/(Already up[ -]to[ -]date|已经是最新的)/.test(ret.stdout)) {
+      await this.reply(`TRSS-WeChat-OC-Plugin${isDevUpdate ? '(dev分支)' : ''}${isMainUpdate ? '(main分支)' : ''}已经是最新版本\n最后更新时间：${time}`)
+    } else {
+      await this.reply(`TRSS-WeChat-OC-Plugin${isDevUpdate ? '(dev分支)' : ''}${isMainUpdate ? '(main分支)' : ''}\n最后更新时间：${time}`)
+      this.isUp = true
+      /** 获取TRSS-WeChat-OC-Plugin的更新日志 */
+      let log = await this.getLog('TRSS-WeChat-OC-Plugin')
+      await this.reply(log)
+    }
+
+    logger.mark(`${this.e.logFnc} 最后更新时间：${time}`)
+
+    return true
+  }
+
+  /**
+   * 获取TRSS-WeChat-OC-Plugin的更新日志
+   * @param {string} plugin 插件名称
+   * @returns
+   */
+  async getLog(plugin = '') {
+    let cm = `cd ./plugins/${plugin}/ && git log  -20 --oneline --pretty=format:"%h||[%cd]  %s" --date=format:"%m-%d %H:%M"`
+
+    let logAll
+    try {
+      logAll = await execSync(cm, { encoding: 'utf-8' })
+    } catch (error) {
+      logger.error(error.toString())
+      this.reply(error.toString())
+    }
+
+    if (!logAll) return false
+
+    logAll = logAll.split('\n')
+
+    let log = []
+    for (let str of logAll) {
+      str = str.split('||')
+      if (str[0] == this.oldCommitId) break
+      if (str[1].includes('Merge branch')) continue
+      log.push(str[1])
+    }
+    let line = log.length
+    log = log.join('\n\n')
+
+    if (log.length <= 0) return ''
+
+    let end = ''
+    end =
+      '更多详细信息，请前往github查看\nhttps://github.com/AIGC-Yunzai/TRSS-WeChat-OC-Plugin'
+
+    log = await this.makeForwardMsg(`TRSS-WeChat-OC-Plugin更新日志，共${line}条`, log, end)
+
+    return log
+  }
+
+  /**
+   * 获取上次提交的commitId
+   * @param {string} plugin 插件名称
+   * @returns
+   */
+  async getcommitId(plugin = '') {
+    let cm = `git -C ./plugins/${plugin}/ rev-parse --short HEAD`
+
+    let commitId = await execSync(cm, { encoding: 'utf-8' })
+    commitId = _.trim(commitId)
+
+    return commitId
+  }
+
+  /**
+   * 获取本次更新插件的最后一次提交时间
+   * @param {string} plugin 插件名称
+   * @returns
+   */
+  async getTime(plugin = '') {
+    let cm = `cd ./plugins/${plugin}/ && git log -1 --oneline --pretty=format:"%cd" --date=format:"%m-%d %H:%M"`
+
+    let time = ''
+    try {
+      time = await execSync(cm, { encoding: 'utf-8' })
+      time = _.trim(time)
+    } catch (error) {
+      logger.error(error.toString())
+      time = '获取时间失败'
+    }
+    return time
+  }
+
+  /**
+   * 制作转发消息
+   * @param {string} title 标题 - 首条消息
+   * @param {string} msg 日志信息
+   * @param {string} end 最后一条信息
+   * @returns
+   */
+  async makeForwardMsg(title, msg, end) {
+    let nickname = (this.e.bot ?? Bot).nickname
+    if (this.e.isGroup) {
+      let info = await (this.e.bot ?? Bot).getGroupMemberInfo?.(this.e.group_id, (this.e.bot ?? Bot).uin) || await (this.e.bot ?? Bot).pickMember?.(this.e.group_id, (this.e.bot ?? Bot).uin);
+      nickname = info.card || info.nickname
+    }
+    let userInfo = {
+      user_id: (this.e.bot ?? Bot).uin,
+      nickname
+    }
+
+    let forwardMsg = [
+      {
+        ...userInfo,
+        message: title
+      },
+      {
+        ...userInfo,
+        message: msg
+      }
+    ]
+
+    if (end) {
+      forwardMsg.push({
+        ...userInfo,
+        message: end
+      })
+    }
+
+    /** 制作转发内容 */
+    if (this.e.group?.makeForwardMsg) {
+      forwardMsg = await this.e.group.makeForwardMsg(forwardMsg)
+    } else if (this.e?.friend?.makeForwardMsg) {
+      forwardMsg = await this.e.friend.makeForwardMsg(forwardMsg)
+    } else {
+      return msg.join('\n')
+    }
+
+    let dec = 'TRSS-WeChat-OC-Plugin 更新日志'
+    /** 处理描述 */
+    if (typeof (forwardMsg.data) === 'object') {
+      let detail = forwardMsg.data?.meta?.detail
+      if (detail) {
+        detail.news = [{ text: dec }]
+      }
+    } else {
+      forwardMsg.data = forwardMsg.data
+        .replace(/\n/g, '')
+        .replace(/<title color="#777777" size="26">(.+?)<\/title>/g, '___')
+        .replace(/___+/, `<title color="#777777" size="26">${dec}</title>`)
+    }
+
+    return forwardMsg
+  }
+
+  /**
+   * 处理更新失败的相关函数
+   * @param {string} err
+   * @param {string} stdout
+   * @returns
+   */
+  async gitErr(err, stdout) {
+    let msg = '更新失败！'
+    let errMsg = err.toString()
+    stdout = stdout.toString()
+
+    if (errMsg.includes('Timed out')) {
+      let remote = errMsg.match(/'(.+?)'/g)[0].replace(/'/g, '')
+      await this.reply(msg + `\n连接超时：${remote}`)
+      return
+    }
+
+    if (/Failed to connect|unable to access/g.test(errMsg)) {
+      let remote = errMsg.match(/'(.+?)'/g)[0].replace(/'/g, '')
+      await this.reply(msg + `\n连接失败：${remote}`)
+      return
+    }
+
+    await this.reply([errMsg, stdout, `\n若存在git冲突，可尝试执行#微信个人号强制更新`])
+  }
+
+  /**
+   * 异步执行git相关命令
+   * @param {string} cmd git命令
+   * @returns
+   */
+  async execSync(cmd) {
+    return new Promise((resolve, reject) => {
+      exec(cmd, { windowsHide: true }, (error, stdout, stderr) => {
+        resolve({ error, stdout, stderr })
+      })
+    })
+  }
+
+  /**
+   * 检查git是否安装
+   * @returns
+   */
+  async checkGit() {
+    let ret = await execSync('git --version', { encoding: 'utf-8' })
+    if (!ret || !ret.includes('git version')) {
+      await this.reply('请先安装git')
+      return false
+    }
+    return true
+  }
 }
 
 // 启动时加载
 adapter.load()
-
 logger.info(logger.green("- 微信个人号适配器插件 加载完成"))
