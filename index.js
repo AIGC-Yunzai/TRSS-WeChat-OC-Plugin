@@ -369,7 +369,7 @@ export const adapter = new class WeixinOCAdapter {
   }
 
   _buildQuotedSource(botId, msg, quote) {
-    if (!quote?.message?.length) return null
+    if (!quote?.has_quote && !quote?.meta) return null
 
     const quotedMeta = quote.meta || {}
     const fromUserId = msg.from_user_id
@@ -378,9 +378,11 @@ export const adapter = new class WeixinOCAdapter {
       nickname: msg.from_user_name || fromUserId,
     }
     const messageId = quotedMeta.message_id || this._makeQuoteMessageId(botId, msg.message_id || msg.msg_id || this._makeMessageId())
-    const img = this._extractImageUrls(quote.message)
+    const quoteMessage = Array.isArray(quote?.message) ? quote.message : []
+    const quoteRawMessage = quote?.raw_message || ""
+    const img = this._extractImageUrls(quoteMessage)
 
-    return {
+    const source = {
       bot: Bot[botId],
       self_id: botId,
       post_type: "message",
@@ -388,19 +390,19 @@ export const adapter = new class WeixinOCAdapter {
       message_id: messageId,
       user_id: sender.user_id,
       sender,
-      message: quote.message,
-      raw_message: quote.raw_message,
-      img,
-      quote: null,
-      quote_message: [],
-      quote_raw_message: "",
+      message: quoteMessage,
+      raw_message: quoteRawMessage,
       source: undefined,
       reply_id: undefined,
-      original_message: quote.message,
-      original_raw_message: quote.raw_message,
+      original_message: quoteMessage,
+      original_raw_message: quoteRawMessage,
       time: messageId,
       seq: messageId,
     }
+
+    if (img.length) source.img = img
+
+    return source
   }
 
   /**
@@ -540,6 +542,7 @@ export const adapter = new class WeixinOCAdapter {
     const quoteRawParts = []
     const textSet = new Set()
     const imageSet = new Set()
+    const mediaSet = new Set()
     const meta = this._extractQuotedMeta({ bot_id: botId }, itemList || [])
 
     for (const item of itemList || []) {
@@ -576,10 +579,53 @@ export const adapter = new class WeixinOCAdapter {
           quoteMessage.push({ type: "text", text: "[引用图片]" })
         }
         quoteRawParts.push("[引用图片]")
+        continue
+      }
+
+      if (type === 3) {
+        const voiceText = item.voice_item?.text?.trim?.() || ""
+        if (voiceText && !textSet.has(voiceText)) {
+          textSet.add(voiceText)
+          quoteMessage.push({ type: "text", text: voiceText })
+          quoteRawParts.push(voiceText)
+          continue
+        }
+
+        const voiceKey = item.voice_item?.media?.encrypt_query_param
+        if (voiceKey && !mediaSet.has(voiceKey)) {
+          mediaSet.add(voiceKey)
+          quoteMessage.push({ type: "record", url: voiceKey })
+          quoteRawParts.push("[quoted voice]")
+        }
+        continue
+      }
+
+      if (type === 4) {
+        const fileKey = item.file_item?.media?.encrypt_query_param
+        if (!fileKey || mediaSet.has(fileKey)) continue
+
+        mediaSet.add(fileKey)
+        quoteMessage.push({
+          type: "file",
+          name: item.file_item?.file_name || "file",
+          url: fileKey,
+        })
+        quoteRawParts.push("[quoted file]")
+        continue
+      }
+
+      if (type === 5) {
+        const videoKey = item.video_item?.media?.encrypt_query_param
+        if (!videoKey || mediaSet.has(videoKey)) continue
+
+        mediaSet.add(videoKey)
+        quoteMessage.push({ type: "video", url: videoKey })
+        quoteRawParts.push("[quoted video]")
       }
     }
 
     return {
+      has_quote: quotedItems.length > 0 || !!meta,
       message: quoteMessage,
       raw_message: quoteRawParts.join(" "),
       img: this._extractImageUrls(quoteMessage),
@@ -694,8 +740,6 @@ export const adapter = new class WeixinOCAdapter {
         ? [{ type: "reply", id: quotedSource.message_id }, ...message]
         : [...message],
       raw_message,
-      img: this._extractImageUrls(message),
-      quote,
       source: quotedSource ? {
         message_id: quotedSource.message_id,
         seq: quotedSource.seq,
@@ -703,21 +747,22 @@ export const adapter = new class WeixinOCAdapter {
         user_id: quotedSource.user_id,
         message: quotedSource.message,
         raw_message: quotedSource.raw_message,
-        img: quotedSource.img,
+        ...(quotedSource.img?.length ? { img: quotedSource.img } : {}),
         sender: quotedSource.sender,
       } : undefined,
       reply_id: quotedSource?.message_id,
-      quote_message: quote.message,
-      quote_raw_message: quote.raw_message,
       original_message: message,
       original_raw_message: raw_message,
     }
 
+    const img = this._extractImageUrls(message)
+    if (img.length) data.img = img
+
     this._cacheMessage(botId, data)
 
     if (config.debug) {
-      logger.mark("引用解析: quote_raw_message =", data.quote_raw_message || "")
-      logger.mark("引用解析: quote_message =", this._debugStringify(data.quote_message || []))
+      logger.mark("引用解析: quote_raw_message =", quote.raw_message || "")
+      logger.mark("引用解析: quote_message =", this._debugStringify(quote.message || []))
       logger.mark("引用解析: source =", this._debugStringify(data.source || {}))
       logger.mark("引用解析: final message =", this._debugStringify(data.message || []))
       logger.mark("引用解析: final raw_message =", data.raw_message || "")
