@@ -342,9 +342,10 @@ export const adapter = new class WeixinOCAdapter {
   }
 
   _extractImageUrls(message = []) {
-    return message
+    const urls = message
       .filter(item => item?.type === "image" && (item?.url || item?.file))
       .map(item => item.url || item.file)
+    return [...new Set(urls)] // 使用 Set 去重，防止 e.img 出现重复元素
   }
 
   _extractQuotedMeta(msg, itemList = []) {
@@ -647,7 +648,7 @@ export const adapter = new class WeixinOCAdapter {
   }
 
   // 解析消息内容
-  _parseItemList(itemList) {
+  async _parseItemList(botId, itemList) {
     const message = []
     const rawMessage = []
 
@@ -664,7 +665,15 @@ export const adapter = new class WeixinOCAdapter {
           break
 
         case 2: // 图片
-          message.push({ type: "image", url: item.image_item?.media?.encrypt_query_param })
+          // 异步下载并解密图片为 Buffer
+          const imageBuffer = await this._decodeInboundImage(botId, item)
+          if (imageBuffer) {
+            const b64 = `base64://${imageBuffer.toString("base64")}`
+            // 同时赋予 file 和 url 满足所有云崽插件的需求
+            message.push({ type: "image", url: b64, file: b64 })
+          } else {
+            message.push({ type: "text", text: "[图片加载失败]" })
+          }
           rawMessage.push("[图片]")
           break
 
@@ -721,7 +730,8 @@ export const adapter = new class WeixinOCAdapter {
       entries.slice(-500).forEach(([k, v]) => this._messageCache.set(k, v))
     }
 
-    const { message, raw_message } = this._parseItemList(msg.item_list)
+    // 增加 await 和 botId 传参
+    const { message, raw_message } = await this._parseItemList(botId, msg.item_list)
     const quote = await this._parseQuotedItems(botId, msg.item_list)
     const quotedSource = this._buildQuotedSource(botId, msg, quote)
 
@@ -764,7 +774,8 @@ export const adapter = new class WeixinOCAdapter {
         sender: quotedSource.sender,
       } : undefined,
       reply_id: quotedSource?.message_id,
-      original_message: message,
+      // 使用 JSON 深拷贝，避免云崽底层处理 message 数组时引发的 [Circular] 引用 bug
+      original_message: JSON.parse(JSON.stringify(message)),
       original_raw_message: raw_message,
     }
 
