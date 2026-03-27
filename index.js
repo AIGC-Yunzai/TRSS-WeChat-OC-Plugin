@@ -426,13 +426,10 @@ export const adapter = new class WeixinOCAdapter {
   configSaveDebounced(userId) {
     if (userId) this._pendingSave.add(userId)
 
-    if (this._saveTimer) clearTimeout(this._saveTimer)
-    this._saveTimer = setTimeout(async () => {
-      if (this._pendingSave.size > 0) {
-        await configSave()
-        this._pendingSave.clear()
-      }
-    }, 30000)
+    // 直接调用 configSave（它已通过 util.debounce 防抖）
+    configSave().then(() => {
+      this._pendingSave.clear() // 保存成功后清空
+    }).catch(console.error)
   }
 
   // 生成消息 ID
