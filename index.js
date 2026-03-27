@@ -235,8 +235,6 @@ export const adapter = new class WeixinOCAdapter {
     this.bots = new Map()
     // 存储登录会话
     this.loginSessions = new Map()
-    // 存储上下文 token (用于回复)
-    this.contextTokens = new Map()
     // 同步缓冲区
     this.syncBuffers = new Map()
     // 防抖保存定时器
@@ -765,16 +763,31 @@ export const adapter = new class WeixinOCAdapter {
       this._cacheMessage(botId, quotedSource)
     }
 
-    // 保存上下文 token (用于回复)
+    // 保存上下文 token (用于回复) 到配置文件
     const contextToken = msg.context_token
     if (contextToken) {
-      const ctKey = `${botId}:${fromUserId}`
-      // 先删后设以维护插入顺序
-      this.contextTokens.delete(ctKey);
-      this.contextTokens.set(ctKey, contextToken);
-      // 【内存优化】限制回复凭证数量，防止内存泄漏
-      while (this.contextTokens.size > 500) {
-        this.contextTokens.delete(this.contextTokens.keys().next().value);
+      const account = config.accounts.find(a => a.bot_id === botId)
+      if (account) {
+        // 如果该账号还没有 context_tokens 对象，则初始化
+        if (!account.context_tokens) {
+          account.context_tokens = {}
+        }
+
+        // 如果 token 发生了变化（或者不存在），则更新并保存
+        if (account.context_tokens[fromUserId] !== contextToken) {
+          // 先删后加，利用 JS 对象键值遍历顺序的特性保持最新鲜
+          delete account.context_tokens[fromUserId]
+          account.context_tokens[fromUserId] = contextToken
+
+          // 【配置文件优化】限制凭证数量，防止 config.yaml 文件体积爆炸
+          const keys = Object.keys(account.context_tokens)
+          if (keys.length > 100) {
+            delete account.context_tokens[keys[0]]
+          }
+
+          // 触发防抖保存，自动更新到 config.yaml 中
+          this.configSaveDebounced(account.user_id)
+        }
       }
     }
 
@@ -1073,10 +1086,12 @@ export const adapter = new class WeixinOCAdapter {
     const normalizedForward = this._normalizeForwardEntries(forward, data.raw_message)
     Bot.makeLog("info", `发送好友消息：[${data.user_id}] ${this.makeLog(msgs)}`, botId, true)
 
-    const contextToken = this.contextTokens.get(`${botId}:${userId}`)
+    // 从 config 对象中读取对应的 contextToken
+    const account = config.accounts.find(a => a.bot_id === botId)
+    const contextToken = account?.context_tokens?.[userId]
     if (!contextToken) {
-      Bot.makeLog("error", "缺少上下文 token，无法发送消息", botId)
-      return { error: "缺少上下文 token" }
+      Bot.makeLog("error", "缺少上下文 contextToken ，无法发送消息。请先让对方给你发一条消息。", botId)
+      return { error: "缺少上下文 contextToken ，无法发送消息。请先让对方给你发一条消息。" }
     }
 
     if (!itemList.length && !normalizedForward.length) {
@@ -1336,7 +1351,6 @@ export const adapter = new class WeixinOCAdapter {
       // 清理资源
       this.bots.delete(botId)
       this.syncBuffers.delete(botId)
-      this.contextTokens.delete(botId)
       delete Bot.bots[botId]
       delete Bot[botId]
 
