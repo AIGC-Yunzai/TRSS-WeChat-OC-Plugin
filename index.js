@@ -1190,9 +1190,8 @@ export const adapter = new class WeixinOCAdapter {
 
         if (result.get_updates_buf) {
           this.syncBuffers.set(botId, result.get_updates_buf)
-          // 防抖保存配置，避免频繁磁盘写入
           const account = config.accounts.find(a => a.bot_id === botId)
-          if (account) {
+          if (account && account.sync_buf !== result.get_updates_buf) {
             account.sync_buf = result.get_updates_buf
             this.configSaveDebounced(account.user_id)
           }
