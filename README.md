@@ -6,16 +6,17 @@
 
 <img decoding="async" align=right src="https://github.com/user-attachments/assets/917d43f5-be69-4303-9539-eb270b40643d" width="20%">
 
-| 功能              | 状态 | 注释                        |
-| ----------------- | ---- | --------------------------- |
-| 扫码登录          | ✅    |                             |
-| 私聊收发文本      | ✅    |                             |
-| 私聊收发图片      | ✅    |                             |
-| 私聊收发视频      | ✅    |                             |
-| 私聊收发文件      | ✅    |                             |
-| 多账号管理        | ✅    |                             |
-| 合并转发消息      | ⚠️    | 降级为多条消息发送          |
-| 语音消息          | ⚠️    | 接收后转文字                |
+| 功能              | 状态 | 注释                            |
+| ----------------- | ---- | ------------------------------- |
+| 扫码登录          | ✅    |                                 |
+| 多账号管理        | ✅    |                                 |
+| 私聊收发文本      | ✅    |                                 |
+| 私聊收发图片      | ✅    |                                 |
+| 私聊收发视频      | ✅    |                                 |
+| 私聊收发文件      | ✅    |                                 |
+| 私聊接收语音      | ⚠️    | Bot 接收后转文字                |
+| 私聊发送语音      | ⚠️    | Bot 以文件发送                  |
+| 合并转发消息      | ⚠️    | 降级为多条消息发送              |
 | 引用消息多媒体url | ⚠️    | `e.img` 为 `base64://` 数组[^1] |
 | 发送消息多媒体url | ⚠️    | `e.img` 为 `base64://` 数组[^1] |
 
@@ -92,7 +93,7 @@ debug: false, # 开启 debug 模式
 
 ## 致谢
 
-- 协议参考：[AstrBot](https://github.com/AstrBotDevs/AstrBot)
+- 协议参考：[AstrBot](https://github.com/AstrBotDevs/AstrBot/tree/master/astrbot/core/platform/sources/weixin_oc)
 - 架构参考：[Yunzai-KOOK-Plugin](https://github.com/TimeRainStarSky/Yunzai-KOOK-Plugin)
 
 ## License

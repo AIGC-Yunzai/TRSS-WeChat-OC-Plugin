@@ -128,7 +128,18 @@ class WeixinClient {
       throw new Error(`HTTP ${response.status}: ${text}`)
     }
 
-    return text ? JSON.parse(text) : {}
+    const json = text ? JSON.parse(text) : {}
+
+    // 处理 iLink 特有的应用层报错
+    if (json && typeof json === 'object') {
+      const ret = json.ret ? parseInt(json.ret) : 0
+      const errcode = json.errcode ? parseInt(json.errcode) : 0
+      if (ret !== 0 || errcode !== 0) {
+        throw new Error(`iLink API Error: ret=${ret}, errcode=${errcode}, errmsg=${json.errmsg || 'none'}`)
+      }
+    }
+
+    return json
   }
 
   // 获取登录二维码
@@ -254,10 +265,7 @@ export const adapter = new class WeixinOCAdapter {
       const inConfig = config.accounts?.some(a => a.bot_id === id)
       // 检查 Bot 对象中是否已存在
       const inBot = !!Bot[id]
-
-      if (!inConfig && !inBot) {
-        return id
-      }
+      if (!inConfig && !inBot) return id
       num++
     }
   }
@@ -279,15 +287,10 @@ export const adapter = new class WeixinOCAdapter {
 
   _summarizeBase64String(value) {
     if (typeof value !== "string" || !value.startsWith("base64://")) return value
-
     const base64 = value.slice("base64://".length)
     const preview = base64.slice(0, 16)
     let bytes = 0
-
-    try {
-      bytes = Buffer.from(base64, "base64").length
-    } catch { }
-
+    try { bytes = Buffer.from(base64, "base64").length } catch { }
     return `base64://${preview}... [bytes=${bytes}]`
   }
 
@@ -295,13 +298,8 @@ export const adapter = new class WeixinOCAdapter {
     if (typeof value === "string") return this._sanitizeLogString(value)
     if (!value || typeof value !== "object") return value
     if (seen.has(value)) return "[Circular]"
-
     seen.add(value)
-
-    if (Array.isArray(value)) {
-      return value.map(item => this._sanitizeDebugValue(item, seen))
-    }
-
+    if (Array.isArray(value)) return value.map(item => this._sanitizeDebugValue(item, seen))
     const sanitized = {}
     for (const [key, item] of Object.entries(value)) {
       sanitized[key] = this._sanitizeDebugValue(item, seen)
@@ -315,9 +313,7 @@ export const adapter = new class WeixinOCAdapter {
 
   _cacheMessage(botId, message) {
     if (!message?.message_id) return
-    if (!this._messageStore.has(botId)) {
-      this._messageStore.set(botId, new Map())
-    }
+    if (!this._messageStore.has(botId)) this._messageStore.set(botId, new Map())
     const botCache = this._messageStore.get(botId)
     const key = message.message_id
 
@@ -327,15 +323,13 @@ export const adapter = new class WeixinOCAdapter {
 
     // 单个 Bot 限制缓存数
     while (botCache.size > 2) {
-      const oldest = botCache.keys().next().value
-      botCache.delete(oldest)
+      botCache.delete(botCache.keys().next().value)
     }
   }
 
   _getCachedMessage(botId, messageId) {
     if (!messageId) return null
-    const botCache = this._messageStore.get(botId)
-    return botCache?.get(messageId) || null
+    return this._messageStore.get(botId)?.get(messageId) || null
   }
 
   _makeQuoteMessageId(botId, messageId) {
@@ -353,11 +347,9 @@ export const adapter = new class WeixinOCAdapter {
     for (const item of itemList) {
       const refMsg = item?.ref_msg
       if (!refMsg || typeof refMsg !== "object") continue
-
       const senderId = refMsg.from_user_id || refMsg.user_id || refMsg.sender_user_id || refMsg.sender_id || refMsg.sender?.user_id
       const senderName = refMsg.from_user_name || refMsg.user_name || refMsg.nickname || refMsg.sender_name || refMsg.sender?.nickname || refMsg.sender?.card
       const messageId = refMsg.message_id || refMsg.msg_id || refMsg.client_id
-
       return {
         message_id: messageId || this._makeQuoteMessageId(msg.bot_id || "", msg.message_id || msg.msg_id || this._makeMessageId()),
         sender: senderId ? {
@@ -366,13 +358,11 @@ export const adapter = new class WeixinOCAdapter {
         } : null,
       }
     }
-
     return null
   }
 
   _buildQuotedSource(botId, msg, quote) {
     if (!quote?.has_quote && !quote?.meta) return null
-
     const quotedMeta = quote.meta || {}
     const fromUserId = msg.from_user_id
     const sender = quotedMeta.sender || {
@@ -402,11 +392,8 @@ export const adapter = new class WeixinOCAdapter {
       seq: messageId,
     }
 
-    if (img && img.length > 0) {
-      source.img = img
-    } else {
-      delete source.img
-    }
+    if (img && img.length > 0) source.img = img
+    else delete source.img
 
     return source
   }
@@ -420,7 +407,7 @@ export const adapter = new class WeixinOCAdapter {
 
     // 直接调用 configSave（它已通过 util.debounce 防抖）
     configSave().then(() => {
-      this._pendingSave.clear() // 保存成功后清空
+      this._pendingSave.clear()
     }).catch(console.error)
   }
 
@@ -431,10 +418,8 @@ export const adapter = new class WeixinOCAdapter {
 
   _normalizeForwardEntries(entries, rawMessage = "") {
     const normalized = []
-
     for (const entry of Array.isArray(entries) ? entries : [entries]) {
       if (entry == null) continue
-
       if (typeof entry === "object" && !Array.isArray(entry) && ("message" in entry || "content" in entry)) {
         const message = entry.message ?? entry.content
         if (message == null) continue
@@ -470,14 +455,8 @@ export const adapter = new class WeixinOCAdapter {
     return normalized.filter(entry => {
       const message = entry?.message
       if (normalized.length > 1 && typeof message === "string" && message.trim().startsWith("#")) return false
-
       let key
-      try {
-        key = JSON.stringify(message)
-      } catch {
-        key = Bot.String(message)
-      }
-
+      try { key = JSON.stringify(message) } catch { key = Bot.String(message) }
       if (seen.has(key)) return false
       seen.add(key)
       return true
@@ -486,25 +465,19 @@ export const adapter = new class WeixinOCAdapter {
 
   _decodeMediaAesKey(aesKey) {
     if (!aesKey || typeof aesKey !== "string") return null
-
     const trimmed = aesKey.trim()
     if (!trimmed) return null
-
     if (/^[0-9a-fA-F]{32}$/.test(trimmed) || /^[0-9a-fA-F]{48}$/.test(trimmed) || /^[0-9a-fA-F]{64}$/.test(trimmed)) {
       return Buffer.from(trimmed, "hex")
     }
-
     try {
       const decoded = Buffer.from(trimmed, "base64")
       const decodedText = decoded.toString("utf8").trim()
-
       if (/^[0-9a-fA-F]{32}$/.test(decodedText) || /^[0-9a-fA-F]{48}$/.test(decodedText) || /^[0-9a-fA-F]{64}$/.test(decodedText)) {
         return Buffer.from(decodedText, "hex")
       }
-
       if ([16, 24, 32].includes(decoded.length)) return decoded
     } catch { }
-
     return null
   }
 
@@ -519,7 +492,6 @@ export const adapter = new class WeixinOCAdapter {
     if (!bot?.client || !encryptedQueryParam) return null
 
     const aesKey = this._decodeMediaAesKey(specificItem.aeskey || media.aes_key)
-
     try {
       const encryptedBuffer = await bot.client.downloadFromCdn(encryptedQueryParam)
       if (!aesKey) return encryptedBuffer
@@ -533,12 +505,10 @@ export const adapter = new class WeixinOCAdapter {
   _collectQuotedItems(item, quotedItems = []) {
     const refMsg = item?.ref_msg
     const refItem = refMsg?.message_item
-
     if (refItem && typeof refItem === "object") {
       quotedItems.push(refItem)
       this._collectQuotedItems(refItem, quotedItems)
     }
-
     return quotedItems
   }
 
@@ -551,9 +521,7 @@ export const adapter = new class WeixinOCAdapter {
     const mediaSet = new Set()
     const meta = this._extractQuotedMeta({ bot_id: botId }, itemList || [])
 
-    for (const item of itemList || []) {
-      this._collectQuotedItems(item, quotedItems)
-    }
+    for (const item of itemList || []) this._collectQuotedItems(item, quotedItems)
 
     if (config.debug) {
       logger.mark("引用解析: 原始 item_list =", this._debugStringify(itemList || []))
@@ -576,15 +544,13 @@ export const adapter = new class WeixinOCAdapter {
       if (type === 2) {
         const imageKey = item.image_item?.media?.encrypt_query_param
         if (!imageKey || imageSet.has(imageKey)) continue
-
         imageSet.add(imageKey)
         const imageBuffer = await this._decodeInboundMedia(botId, item, "image_item")
         if (imageBuffer) {
           const b64 = `base64://${imageBuffer.toString("base64")}`
-          // 同时赋予 file 和 url，兼容旧版云崽和所有插件规范
           quoteMessage.push({ type: "image", url: b64 })
         } else {
-          quoteMessage.push({ type: "text", text: "[引用图片]" })
+          quoteMessage.push({ type: "text", text: "[引用图片加载失败]" })
         }
         quoteRawParts.push("[引用图片]")
         continue
@@ -598,12 +564,17 @@ export const adapter = new class WeixinOCAdapter {
           quoteRawParts.push(voiceText)
           continue
         }
-
         const voiceKey = item.voice_item?.media?.encrypt_query_param
         if (voiceKey && !mediaSet.has(voiceKey)) {
           mediaSet.add(voiceKey)
-          quoteMessage.push({ type: "record", url: voiceKey })
-          quoteRawParts.push("[quoted voice]")
+          const voiceBuffer = await this._decodeInboundMedia(botId, item, "voice_item")
+          if (voiceBuffer) {
+            const b64 = `base64://${voiceBuffer.toString("base64")}`
+            quoteMessage.push({ type: "record", url: b64, file: b64 })
+          } else {
+            quoteMessage.push({ type: "text", text: "[引用语音加载失败]" })
+          }
+          quoteRawParts.push("[引用语音]")
         }
         continue
       }
@@ -611,21 +582,19 @@ export const adapter = new class WeixinOCAdapter {
       if (type === 4) {
         const fileKey = item.file_item?.media?.encrypt_query_param
         if (!fileKey || mediaSet.has(fileKey)) continue
-
         mediaSet.add(fileKey)
         quoteMessage.push({
           type: "file",
           name: item.file_item?.file_name || "file",
           url: fileKey,
         })
-        quoteRawParts.push("[quoted file]")
+        quoteRawParts.push("[引用文件]")
         continue
       }
 
       if (type === 5) {
         const videoKey = item.video_item?.media?.encrypt_query_param
         if (!videoKey || mediaSet.has(videoKey)) continue
-
         mediaSet.add(videoKey)
         const videoBuffer = await this._decodeInboundMedia(botId, item, "video_item")
         if (videoBuffer) {
@@ -640,7 +609,7 @@ export const adapter = new class WeixinOCAdapter {
         } else {
           quoteMessage.push({ type: "text", text: "[引用视频加载失败]" })
         }
-        quoteRawParts.push("[quoted video]")
+        quoteRawParts.push("[引用视频]")
       }
     }
 
@@ -653,7 +622,6 @@ export const adapter = new class WeixinOCAdapter {
     }
   }
 
-  // 解析消息内容
   async _parseItemList(botId, itemList) {
     const message = []
     const rawMessage = []
@@ -671,12 +639,10 @@ export const adapter = new class WeixinOCAdapter {
           break
 
         case 2: // 图片
-          // 异步下载并解密图片为 Buffer
           const imageBuffer = await this._decodeInboundMedia(botId, item, "image_item")
           if (imageBuffer) {
             const b64 = `base64://${imageBuffer.toString("base64")}`
-            // 同时赋予 file 和 url 满足所有云崽插件的需求
-            message.push({ type: "image", url: b64 })
+            message.push({ type: "image", url: b64, file: b64 })
           } else {
             message.push({ type: "text", text: "[图片加载失败]" })
           }
@@ -689,7 +655,14 @@ export const adapter = new class WeixinOCAdapter {
             message.push({ type: "text", text: voiceText })
             rawMessage.push(voiceText)
           } else {
-            message.push({ type: "record", url: item.voice_item?.media?.encrypt_query_param })
+            // 解析并下载解密语音 (.silk)
+            const voiceBuffer = await this._decodeInboundMedia(botId, item, "voice_item")
+            if (voiceBuffer) {
+              const b64 = `base64://${voiceBuffer.toString("base64")}`
+              message.push({ type: "record", file: b64, url: b64 })
+            } else {
+              message.push({ type: "text", text: "[语音加载失败]" })
+            }
             rawMessage.push("[语音]")
           }
           break
@@ -704,11 +677,9 @@ export const adapter = new class WeixinOCAdapter {
           break
 
         case 5: // 视频
-          // 异步下载并解密视频为 Buffer 进而输出 Base64
           const videoBuffer = await this._decodeInboundMedia(botId, item, "video_item")
           if (videoBuffer) {
             const b64 = `base64://${videoBuffer.toString("base64")}`
-            // 修复：补全缺失的 file_size 和 file_name，将 file 设为正常文件名以防止插件崩溃
             message.push({
               type: "video",
               url: b64,
@@ -730,7 +701,7 @@ export const adapter = new class WeixinOCAdapter {
     return { message, raw_message: rawMessage.join(" ") }
   }
 
-  // 构建 Yunzai 消息数据
+  // 构建 Yunzai 消息接收的 e 数据
   async makeMessage(botId, msg) {
     const fromUserId = msg.from_user_id
     const messageId = msg.message_id || msg.msg_id || this._makeMessageId()
@@ -738,48 +709,36 @@ export const adapter = new class WeixinOCAdapter {
 
     // 消息去重：使用 msg_id + client_id 组合
     const dedupKey = `${botId}:${messageId}:${clientId}`
-    if (this._messageCache.has(dedupKey)) {
-      return  // 重复消息，忽略
-    }
+    if (this._messageCache.has(dedupKey)) return
+
     // 限制去重缓存容量
     this._messageCache.set(dedupKey, Date.now())
     while (this._messageCache.size > 500) {
-      const oldestKey = this._messageCache.keys().next().value;
-      this._messageCache.delete(oldestKey);
+      this._messageCache.delete(this._messageCache.keys().next().value)
     }
 
-    // 增加 await 和 botId 传参
     const { message, raw_message } = await this._parseItemList(botId, msg.item_list)
-    const quote = await this._parseQuotedItems(botId, msg.item_list)
-    const quotedSource = this._buildQuotedSource(botId, msg, quote)
 
-    if (quotedSource) {
-      this._cacheMessage(botId, quotedSource)
-    }
+    // 从CDN获取引用消息的内容
+    const quote = await this._parseQuotedItems(botId, msg.item_list)
+    // 整理构建引用消息
+    const quotedSource = this._buildQuotedSource(botId, msg, quote)
+    // 将引用消息缓存下来供云崽 e.getReply 方法调用
+    if (quotedSource) this._cacheMessage(botId, quotedSource)
 
     // 保存上下文 token (用于回复) 到配置文件
     const contextToken = msg.context_token
     if (contextToken) {
       const account = config.accounts.find(a => a.bot_id === botId)
       if (account) {
-        // 如果该账号还没有 context_tokens 对象，则初始化
-        if (!account.context_tokens) {
-          account.context_tokens = {}
-        }
-
-        // 如果 token 发生了变化（或者不存在），则更新并保存
+        if (!account.context_tokens) account.context_tokens = {}
         if (account.context_tokens[fromUserId] !== contextToken) {
-          // 先删后加，利用 JS 对象键值遍历顺序的特性保持最新鲜
           delete account.context_tokens[fromUserId]
           account.context_tokens[fromUserId] = contextToken
 
           // 限制凭证数量 // 如果 Bot 能够一对多回复的话才有用，现在1个Wechat只能1个Bot
           const keys = Object.keys(account.context_tokens)
-          if (keys.length > 100) {
-            delete account.context_tokens[keys[0]]
-          }
-
-          // 触发防抖保存，自动更新到 config.yaml 中
+          if (keys.length > 100) delete account.context_tokens[keys[0]]
           this.configSaveDebounced(account.user_id)
         }
       }
@@ -789,7 +748,6 @@ export const adapter = new class WeixinOCAdapter {
       bot: Bot[botId],
       self_id: botId,
       raw: msg,
-
       post_type: "message",
       message_type: "private",
       user_id: `wx_${fromUserId}`,
@@ -826,11 +784,8 @@ export const adapter = new class WeixinOCAdapter {
 
     // 判断如果 img.length 为 0，则删掉 e.img
     const img = this._extractImageUrls(message)
-    if (img && img.length > 0) {
-      data.img = img
-    } else {
-      delete data.img
-    }
+    if (img && img.length > 0) data.img = img
+    else delete data.img
 
     this._cacheMessage(botId, data)
 
@@ -869,7 +824,7 @@ export const adapter = new class WeixinOCAdapter {
         // 处理 base64 格式的媒体数据
         const base64Data = file.replace(/^base64:\/\//, "")
         fileBuffer = Buffer.from(base64Data, "base64")
-        fileName = "base64_file" // 后续代码有魔数检测，会自动判断出正确的格式(jpg/png等)
+        fileName = "base64_file"
       } else if (file.startsWith("file://")) {
         // 兼容 file:// 协议的文件路径
         const filePath = file.replace(/^file:\/\//, "")
@@ -885,7 +840,7 @@ export const adapter = new class WeixinOCAdapter {
     const fileKey = crypto.randomUUID().replace(/-/g, "")
     const aesKeyHex = crypto.randomUUID().replace(/-/g, "")
     const rawMd5 = crypto.createHash("md5").update(fileBuffer).digest("hex")
-    const cipherSize = fileBuffer.length + (16 - (fileBuffer.length % 16) || 16)  // AES 填充后大小
+    const cipherSize = fileBuffer.length + (16 - (fileBuffer.length % 16) || 16)
 
     // 判断媒体类型 - 优先通过文件内容检测
     let mediaType = 3  // 文件
@@ -901,10 +856,10 @@ export const adapter = new class WeixinOCAdapter {
       itemType = 5
     }
 
-    // 如果无法通过扩展名判断，尝试通过文件内容魔数检测
+    // 文件头魔数检测加强
     if (itemType === 4 && fileBuffer.length > 4) {
       // 检查文件魔数
-      const header = fileBuffer.slice(0, 4).toString("hex")
+      const header = fileBuffer.subarray(0, 4).toString("hex")
       if (header.startsWith("ffd8ff")) {  // JPEG
         mediaType = 1
         itemType = 2
@@ -964,7 +919,7 @@ export const adapter = new class WeixinOCAdapter {
     }
   }
 
-  // 构建消息项 - 标准化与 Yunzai segment 兼容
+  // 构建Bot发送消息项 - 标准化与 Yunzai segment 兼容
   async makeMsg(data, msg) {
     if (!Array.isArray(msg)) msg = [msg]
 
@@ -1035,9 +990,23 @@ export const adapter = new class WeixinOCAdapter {
           break
 
         case "record":
-          // 微信语音需要 silk 格式，暂不支持
-          msgs.push({ type: "text", text: "[语音消息暂不支持]" })
-          itemList.push({ type: 1, text_item: { text: "[语音消息暂不支持]" } })
+          // 云崽传来的语音：因微信不支持随意格式发送语音块，将其作为文件发送给微信端
+          try {
+            const userId = data.user_id?.replace(/^wx_/, "") || ""
+            const { media, rawSize } = await this.uploadMedia(data.self_id, i.data.file || i.data.url, userId)
+            msgs.push({ type: "record", ...i.data })
+            itemList.push({
+              type: 4,
+              file_item: {
+                media,
+                file_name: "voice_record.mp3", // 大多数插件发来的是 mp3 或 amr
+                len: String(rawSize),
+              },
+            })
+          } catch (err) {
+            logger.error("转发语音为文件失败:", err)
+            itemList.push({ type: 1, text_item: { text: "[语音上传失败]" } })
+          }
           break
 
         case "at":
@@ -1104,7 +1073,6 @@ export const adapter = new class WeixinOCAdapter {
         const firstResult = (Array.isArray(forwardResult) && forwardResult.length > 0) ? forwardResult[0] : {}
         // 兼容云崽加个时间戳
         firstResult.time ??= Date.now();
-        // 将第一条消息的属性展开到最外层，兼容框架对 message_id 的读取
         return { ...firstResult, data: { forward: forwardResult } }
       }
 
@@ -1166,7 +1134,6 @@ export const adapter = new class WeixinOCAdapter {
     const self_id = data.self_id
     if (typeof user_id !== "string") user_id = String(user_id)
     user_id = user_id.replace(/^wx_/, "")
-
     const full_user_id = `wx_${user_id}`
 
     const i = {
@@ -1183,7 +1150,7 @@ export const adapter = new class WeixinOCAdapter {
       recallMsg: message_id => this.recallMsg(i, message_id),
       getInfo: () => this.getFriendInfo(i),
       getChatHistory: (message_seq, count, reverseOrder = true) => this.getFriendMsgHistory(i, message_seq, count, reverseOrder),
-      getAvatarUrl: () => Promise.resolve(""),  // 微信不提供
+      getAvatarUrl: () => Promise.resolve(""),
     }
   }
 
@@ -1198,8 +1165,8 @@ export const adapter = new class WeixinOCAdapter {
         const syncBuf = account?.sync_buf || ""
         const result = await bot.client.getUpdates(syncBuf)
 
-        if (result.get_updates_buf) {
-          if (account && account.sync_buf !== result.get_updates_buf) {
+        if (result.get_updates_buf && account) {
+          if (account.sync_buf !== result.get_updates_buf) {
             account.sync_buf = result.get_updates_buf
             this.configSaveDebounced(account.user_id)
           }
@@ -1211,18 +1178,20 @@ export const adapter = new class WeixinOCAdapter {
           await this.makeMessage(botId, msg)
         }
       } catch (err) {
-        if (err.message?.includes("timeout")) {
-          // 长轮询超时是正常的，继续
+        // 忽略网络长轮询超时/主动截断
+        if (err.message?.includes("timeout") || err.name === "AbortError") {
           continue
         }
-        // Token 失效检测
-        if (err.message?.includes("401") || err.message?.includes("403") || err.message?.includes("invalid token")) {
-          Bot.makeLog("error", `Token 已过期，需要重新登录: ${err.message}`, botId)
+
+        // iLink API 返回的 Token 失效校验
+        if (err.message?.includes("401") || err.message?.includes("403") || err.message?.includes("ret=100") || err.message?.includes("invalid token")) {
+          Bot.makeLog("error", `微信 Token 已过期，需要重新登录: ${err.message}`, botId)
           Bot[botId]._needRelogin = true
           Bot[botId]._stop = true
           continue
         }
-        Bot.makeLog("error", `消息轮询错误: ${err.message}`, botId)
+
+        Bot.makeLog("error", `微信消息轮询错误: ${err.message}`, botId)
         await Bot.sleep(5000)
       }
     }
@@ -1247,7 +1216,7 @@ export const adapter = new class WeixinOCAdapter {
     try {
       await client.getUpdates(accountConfig.sync_buf || "")
     } catch (err) {
-      if (err.message?.includes("401") || err.message?.includes("403")) {
+      if (err.message?.includes("401") || err.message?.includes("403") || err.message?.includes("ret=100")) {
         return { needLogin: true, client, error: "Token 已过期，需要重新登录" }
       }
     }
@@ -1263,7 +1232,6 @@ export const adapter = new class WeixinOCAdapter {
     Bot[id] = {
       adapter: this,
       client: client,
-
       info: {
         user_id: accountConfig.user_id,
         nickname: accountConfig.nickname || accountConfig.user_id,
@@ -1276,17 +1244,12 @@ export const adapter = new class WeixinOCAdapter {
         version: this.version,
       },
       stat: { start_time: Date.now() / 1000 },
-
       pickFriend: (user_id) => this.pickFriend({ self_id: id }, user_id),
       get pickUser() { return this.pickFriend },
-
-      // 新增：注册全局的 getMsg 方法供插件调用
       getMsg: async (message_id) => this.getMsg({ self_id: id }, message_id),
-
       fl: new Map(),
       gl: new Map(),
       gml: new Map(),
-
       _stop: false,
     }
 
@@ -1310,14 +1273,7 @@ export const adapter = new class WeixinOCAdapter {
     this._loaded = true
 
     let needSave = false
-
     for (const account of config.accounts || []) {
-      // 兼容旧配置：如果没有 bot_id，为其分配一个并保存
-      if (!account.bot_id) {
-        account.bot_id = this._getNextBotId()
-        needSave = true
-      }
-
       const botId = account.bot_id
       // 跳过已连接的账号
       if (Bot[botId] && !Bot[botId]._stop) {
@@ -1329,23 +1285,17 @@ export const adapter = new class WeixinOCAdapter {
         await Bot.sleep(2000, this.connect(account))
       }
     }
-
-    if (needSave) {
-      await configSave()
-    }
+    if (needSave) await configSave()
   }
 
   // 销毁 Bot 实例并清理资源
   async destroyBot(botId) {
     if (Bot[botId]) {
       Bot[botId]._stop = true
-      await Bot.sleep(1000)  // 等待轮询退出
-
-      // 清理资源
+      await Bot.sleep(1000)
       this.bots.delete(botId)
       delete Bot.bots[botId]
       delete Bot[botId]
-
       Bot.makeLog("mark", `${this.name} 已断开: ${botId}`, botId)
     }
   }
@@ -1394,18 +1344,17 @@ export const adapter = new class WeixinOCAdapter {
       await e.reply(`请使用微信扫码登录，或手动访问:\n${qrcodeUrl}`)
     }
 
-    // 4. 轮询扫码状态
+    // 给后台运维或纯命令行服务器使用的链接
+    logger.mark(`[微信扫码登录] 如果无法在聊天查看图片，可复制此链接在浏览器访问: https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qrcodeUrl)}`)
+
     const startTime = Date.now()
-    const maxWait = 5 * 60 * 1000  // 5 分钟
+    const maxWait = 5 * 60 * 1000
 
     while (Date.now() - startTime < maxWait) {
       await Bot.sleep(config.qr_poll_interval)
-
       try {
         const status = await client.pollQRStatus(qrcode)
-
         if (status.status === "confirmed") {
-          // 登录成功
           const existing = config.accounts.find(a => a.user_id === status.ilink_user_id)
           let botId
 
@@ -1429,7 +1378,6 @@ export const adapter = new class WeixinOCAdapter {
           }
 
           await configSave()
-
           const currentAccount = config.accounts.find(a => a.user_id === status.ilink_user_id)
 
           // 创建 bot
@@ -1450,10 +1398,8 @@ export const adapter = new class WeixinOCAdapter {
           e.reply("二维码已过期，请重新登录")
           return false
         }
-        // status === "wait" 继续等待
-
       } catch (err) {
-        if (!err.message?.includes("timeout")) {
+        if (!err.message?.includes("timeout") && err.name !== "AbortError") {
           logger.error("轮询二维码状态失败:", err)
         }
       }
