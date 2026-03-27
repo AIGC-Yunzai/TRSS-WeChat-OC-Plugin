@@ -233,12 +233,6 @@ export const adapter = new class WeixinOCAdapter {
   constructor() {
     // 存储 bot 实例
     this.bots = new Map()
-    // 存储登录会话
-    this.loginSessions = new Map()
-    // 同步缓冲区
-    this.syncBuffers = new Map()
-    // 防抖保存定时器
-    this._saveTimer = null
     // 待保存的账号数据
     this._pendingSave = new Set()
     // 消息去重缓存
@@ -747,7 +741,7 @@ export const adapter = new class WeixinOCAdapter {
     if (this._messageCache.has(dedupKey)) {
       return  // 重复消息，忽略
     }
-    // 【内存优化】O(1) 限制去重缓存容量
+    // 限制去重缓存容量
     this._messageCache.set(dedupKey, Date.now())
     while (this._messageCache.size > 500) {
       const oldestKey = this._messageCache.keys().next().value;
@@ -779,7 +773,7 @@ export const adapter = new class WeixinOCAdapter {
           delete account.context_tokens[fromUserId]
           account.context_tokens[fromUserId] = contextToken
 
-          // 【配置文件优化】限制凭证数量，防止 config.yaml 文件体积爆炸
+          // 限制凭证数量 // 如果 Bot 能够一对多回复的话才有用，现在1个Wechat只能1个Bot
           const keys = Object.keys(account.context_tokens)
           if (keys.length > 100) {
             delete account.context_tokens[keys[0]]
@@ -1200,12 +1194,11 @@ export const adapter = new class WeixinOCAdapter {
 
     while (Bot[botId] && !Bot[botId]._stop) {
       try {
-        const syncBuf = this.syncBuffers.get(botId) || ""
+        const account = config.accounts.find(a => a.bot_id === botId)
+        const syncBuf = account?.sync_buf || ""
         const result = await bot.client.getUpdates(syncBuf)
 
         if (result.get_updates_buf) {
-          this.syncBuffers.set(botId, result.get_updates_buf)
-          const account = config.accounts.find(a => a.bot_id === botId)
           if (account && account.sync_buf !== result.get_updates_buf) {
             account.sync_buf = result.get_updates_buf
             this.configSaveDebounced(account.user_id)
@@ -1350,7 +1343,6 @@ export const adapter = new class WeixinOCAdapter {
 
       // 清理资源
       this.bots.delete(botId)
-      this.syncBuffers.delete(botId)
       delete Bot.bots[botId]
       delete Bot[botId]
 

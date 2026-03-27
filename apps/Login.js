@@ -48,7 +48,7 @@ export class WeixinOC extends plugin {
             if (!bot._stop) online.push(`${bot.info.nickname || bot.info.user_id} \n e.user_id: wx_${bot.info.user_id}\n Bot.uin: ${id}`)
         }
 
-        this.e.reply(await common.makeForwardMsg(this.e, ["已保存的账号：", ...list, "已登录的账号：", ...online,"可用指令：\n #微信登录\n #微信删除[序号]\n #微信列表"], this.e.msg));
+        this.e.reply(await common.makeForwardMsg(this.e, ["已保存的账号：", ...list, "已登录的账号：", ...online, "可用指令：\n #微信登录\n #微信删除[序号]\n #微信列表"], this.e.msg));
     }
 
     // 删除账号
@@ -57,11 +57,8 @@ export class WeixinOC extends plugin {
         const input = this.e.msg.replace(/^#微信(个人号)?(删除|移除)/, "").trim()
 
         // 先立即保存任何待保存的配置
-        if (adapter._saveTimer) {
-            clearTimeout(adapter._saveTimer)
-            await configSave()
-            adapter._pendingSave.clear()
-        }
+        await configSave()
+        adapter._pendingSave.clear()
 
         const index = parseInt(input) - 1
 
