@@ -1054,26 +1054,40 @@ export const adapter = new class WeixinOCAdapter {
     }
 
     try {
+      // 1. 只有合并转发消息 (没有普通图文)
       if (!itemList.length) {
         if (config.debug)
           logger.mark(`发送转发兼容消息: count=${normalizedForward.length}`)
         const forwardResult = await Bot.sendForwardMsg(msg => this.sendFriendMsg(data, msg), normalizedForward)
-        return { data: { forwarded: true, results: forwardResult } }
+        // 取转发消息的第一条 result
+        const firstResult = (Array.isArray(forwardResult) && forwardResult.length > 0) ? forwardResult[0] : {}
+        // 兼容云崽加个时间戳
+        firstResult.time ??= Date.now();
+        // 将第一条消息的属性展开到最外层，兼容框架对 message_id 的读取
+        return { ...firstResult, data: { forward: forwardResult } }
       }
 
+      // 2. 发送普通消息
       if (config.debug)
         logger.mark("发送消息 itemList:", this._debugStringify(itemList))
       const result = await Bot[botId].client.sendMessage(userId, itemList, contextToken)
-      // 返回的 result = {} ，兼容云崽加个时间戳
+
+      // 兼容云崽加个时间戳
       result.time ??= Date.now();
       if (config.debug)
         logger.mark("发送消息结果:", result)
+
+      // 3. 混合消息场景：发完普通消息后，还带有合并转发节点
       if (normalizedForward.length) {
         if (config.debug)
           logger.mark(`发送转发兼容消息: count=${normalizedForward.length}`)
         const forwardResult = await Bot.sendForwardMsg(msg => this.sendFriendMsg(data, msg), normalizedForward)
-        return { data: { message: result, forward: forwardResult } }
+
+        // 混合消息的第一条必定是普通消息的 result，所以把 result 展开在最外层
+        return { ...result, data: { message: result, forward: forwardResult } }
       }
+
+      // 4. 只有普通消息
       return result
     } catch (err) {
       Bot.makeLog("error", `发送消息失败: ${err.message}`, botId)
