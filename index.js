@@ -19,6 +19,7 @@ export const { config, configSave } = await makeConfig("WeixinOC", {
   api_timeout: 15000,  // API 超时(ms)
   // 账号配置 (扫码登录后会自动保存)
   accounts: [],  // { bot_id, token, account_id, user_id, nickname }
+  set_nickname_require_master: false, // 微信内设置昵称命令是否要求主人权限
   debug: false,
 }, {
   tips: [
