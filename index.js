@@ -896,6 +896,12 @@ export const adapter = new class WeixinOCAdapter {
       logger.mark("getUploadUrl 响应:", uploadUrlRes)
 
     const uploadParam = uploadUrlRes.upload_param
+    // 兼容 API 返回 upload_full_url 的情况
+    if (!uploadParam && uploadUrlRes.upload_full_url) {
+      // 从完整 URL 中提取 encrypted_query_param
+      const url = new URL(uploadUrlRes.upload_full_url.trim())
+      uploadParam = url.searchParams.get('encrypted_query_param')
+    }
     if (!uploadParam) throw new Error(`Failed to get upload URL: ${JSON.stringify(uploadUrlRes)}`)
 
     // 上传文件
