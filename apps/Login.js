@@ -25,8 +25,7 @@ export class WeixinOC extends plugin {
                 },
                 {
                     reg: "^#微信(个人号)?(设置|修改)昵称.*$",
-                    fnc: "SetNickname",
-                    permission: 'master'
+                    fnc: "SetNickname"
                 },
             ],
         })
@@ -92,48 +91,71 @@ export class WeixinOC extends plugin {
     async SetNickname() {
         const { adapter, config, configSave } = await import('../index.js')
 
+        // 判断指令是否来源于微信个人号 (根据 adapter.id 判断)
+        const isWechat = this.e.bot?.version?.id === "WeixinOC"
+        if (!isWechat && !this.e.isMaster) {
+            this.reply("暂无权限，仅主人或在微信内可使用此指令", true)
+            return false
+        }
+
         const input = this.e.msg.replace(/^#微信(个人号)?(设置|修改)昵称/, "").trim()
-
-        if (!input) {
-            this.reply("请指定要修改的账号序号或标识，例如：\n#微信个人号设置昵称 1\n#微信个人号设置昵称 1 新名字", true)
-            return
-        }
-
-        // 按第一个空格分割输入内容，获取目标ID和直接附带的新昵称
-        let targetId = input
-        let newNickname = ""
-        const spaceIndex = input.indexOf(" ")
-
-        if (spaceIndex > -1) {
-            targetId = input.substring(0, spaceIndex).trim()
-            newNickname = input.substring(spaceIndex + 1).trim()
-        }
-
-        // 查找指定的账号
         const accounts = config.accounts || []
         let targetAccount = null
-        const index = parseInt(targetId) - 1
+        let newNickname = ""
 
-        if (!isNaN(index) && index >= 0 && index < accounts.length) {
-            targetAccount = accounts[index]
+        if (isWechat) {
+            // 微信内：仅可以修改当前Bot的昵称，不需要序号解析
+            targetAccount = accounts.find(a => a.bot_id === this.e.self_id)
+            if (!targetAccount) {
+                this.reply("未找到当前账号的配置信息", true)
+                return
+            }
+            // 微信内输入的全部内容直接作为新昵称
+            newNickname = input
         } else {
-            targetAccount = accounts.find(a => a.user_id === targetId || a.nickname === targetId || a.bot_id === targetId)
-        }
+            // 非微信内(如QQ等)：必须指定序号或标识
+            if (!input) {
+                this.reply("请指定要修改的账号序号或标识，例如：\n#微信个人号设置昵称 1\n#微信个人号设置昵称 1 新名字", true)
+                return
+            }
 
-        if (!targetAccount) {
-            this.reply("未找到指定账号，请使用 #微信个人号列表 查看", true)
-            return
+            // 按第一个空格分割输入内容，获取目标ID和直接附带的新昵称
+            let targetId = input
+            const spaceIndex = input.indexOf(" ")
+
+            if (spaceIndex > -1) {
+                targetId = input.substring(0, spaceIndex).trim()
+                newNickname = input.substring(spaceIndex + 1).trim()
+            }
+
+            // 查找指定的账号
+            const index = parseInt(targetId) - 1
+            if (!isNaN(index) && index >= 0 && index < accounts.length) {
+                targetAccount = accounts[index]
+            } else {
+                targetAccount = accounts.find(a => a.user_id === targetId || a.nickname === targetId || a.bot_id === targetId)
+            }
+
+            if (!targetAccount) {
+                this.reply("未找到指定账号，请使用 #微信个人号列表 查看", true)
+                return
+            }
         }
 
         // 如果用户在指令中没有提供新昵称，则启动 awaitContext 等待用户二次输入
         if (!newNickname) {
             await this.e.reply(`请输入账号 [${targetAccount.user_id}] 的新昵称，请在120秒内发送：`, true, { recallMsg: 119 })
             try {
-                const e_new = await this.awaitContext()
-                if (!e_new || !e_new.msg) return // 超时或出错直接退出
+                if (typeof this.awaitContext === 'function') {
+                    const e_new = await this.awaitContext()
+                    if (!e_new || !e_new.msg) return // 超时或出错直接退出
 
-                // 去除可能重复输入的指令前缀并获取新昵称
-                newNickname = e_new.msg.replace(/^#微信(个人号)?(设置|修改)昵称/, "").trim()
+                    // 去除可能重复输入的指令前缀并获取新昵称
+                    newNickname = e_new.msg.replace(/^#微信(个人号)?(设置|修改)昵称/, "").trim()
+                } else {
+                    this.reply("当前环境不支持上下文等待，请一次性发送完整指令。", true)
+                    return
+                }
             } catch (err) {
                 return // awaitContext 异常捕获退出
             }
@@ -142,6 +164,10 @@ export class WeixinOC extends plugin {
                 this.reply("昵称不能为空，已取消设置。", true)
                 return
             }
+        }
+        if (newNickname.length > 50) {
+            this.reply(`❌昵称长度不能超过 50 个字符！你当前输入了 ${newNickname.length} 个字符，请缩短后重试。`, true)
+            return
         }
 
         // 保存前先清理并同步配置(防冲突处理)
@@ -154,13 +180,18 @@ export class WeixinOC extends plugin {
         targetAccount.nickname = newNickname
         await configSave()
 
-        // 如果该账号当前处于在线状态，同步更新内存中机器人的 info 数据，让#微信列表马上生效
-        const bot = adapter.bots.get(targetAccount.bot_id)
+        // 如果该账号当前处于在线状态，同步更新内存中机器人的 info 数据，让修改直接生效
+        const botId = targetAccount.bot_id
+        const bot = adapter.bots.get(botId)
         if (bot && bot.info) {
             bot.info.nickname = newNickname
         }
 
-        this.reply(`✅修改成功，重启生效！\n账号：${targetAccount.user_id}\n旧昵称：${oldName}\n新昵称：${newNickname}`, true)
-    }
+        // 确保全局 Bot 变量中也实时修改成功
+        if (global.Bot && global.Bot[botId] && global.Bot[botId].info) {
+            global.Bot[botId].info.nickname = newNickname
+        }
 
+        this.reply(`✅修改成功！\n账号：${targetAccount.user_id}\n旧昵称：${oldName}\n新昵称：${newNickname}`, true)
+    }
 }
