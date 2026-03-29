@@ -263,6 +263,44 @@ export const adapter = new class WeixinOCAdapter {
   }
 
   /**
+   * Redis 缓存获取 contextToken 和 syncBuf
+   */
+  async getWxData(botId) {
+    if (!botId) return { syncBuf: "", contextToken: "" }
+    const data = { syncBuf: "", contextToken: "" }
+    try {
+      data.syncBuf = (await redis.hGet(`WeixinOC:data:${botId}`, "sync_buf")) || ""
+      data.contextToken = (await redis.hGet(`WeixinOC:data:${botId}`, "context_token")) || ""
+    } catch (err) {
+      logger.error(`[微信个人号] ${botId} Redis 读取失败: ${err.message}`)
+    }
+    return data
+  }
+
+  /**
+   * 更新并写入 Redis 缓存 (仅当发生改变时)
+   */
+  async setWxData(botId, key, value) {
+    if (!botId || !value) return
+    const data = await this.getWxData(botId)
+
+    if (data[key] !== value) {
+      const keyMap = {
+        contextToken: "context_token",
+        syncBuf: "sync_buf"
+      }
+      const redisKey = keyMap[key]
+      if (!redisKey) return logger.warn(`[微信个人号][setWxData] 未识别的 Key: ${key}`);
+
+      try {
+        await redis.hSet(`WeixinOC:data:${botId}`, redisKey, value)
+      } catch (err) {
+        logger.error(`[微信个人号] Redis 写入失败: ${err.message}`)
+      }
+    }
+  }
+
+  /**
    * 生成新的 weixin_personal_XXX ID
    */
   _getNextBotId() {
@@ -755,17 +793,9 @@ export const adapter = new class WeixinOCAdapter {
     // 将引用消息缓存下来供云崽 e.getReply 方法调用
     if (quotedSource) this._cacheMessage(botId, quotedSource)
 
-    // 保存上下文 token (用于回复) 到配置文件
-    const contextToken = msg.context_token
-    if (contextToken) {
-      const account = config.accounts.find(a => a.bot_id === botId)
-      if (account && account.context_token !== contextToken) {
-        account.context_token = contextToken
-        // 为了保持配置文件干净，如果有旧的 context_tokens 对象，顺手删掉 // TODO: 下个月删除此代码
-        if (account.context_tokens) delete account.context_tokens
-
-        this.configSaveDebounced(account.user_id)
-      }
+    // 保存上下文 token (用于回复) 到 Redis 缓存中
+    if (msg.context_token) {
+      await this.setWxData(botId, "contextToken", msg.context_token)
     }
 
     const accountInfo = config.accounts.find(a => a.bot_id === botId)
@@ -1076,9 +1106,9 @@ export const adapter = new class WeixinOCAdapter {
     const normalizedForward = this._normalizeForwardEntries(forward, data.raw_message)
     Bot.makeLog("info", `发送好友消息：[${data.user_id}] ${this.makeLog(msgs)}`, botId, true)
 
-    // 从 config 对象中读取对应的 contextToken
-    const account = config.accounts.find(a => a.bot_id === botId)
-    const contextToken = account?.context_token
+    // 从 Redis 缓存中读取 contextToken
+    const wxData = await this.getWxData(botId)
+    const contextToken = wxData.contextToken
     if (!contextToken) {
       Bot.makeLog("error", "缺少上下文 contextToken ，无法发送消息。请先让对方给你发一条消息。", botId)
       return { error: "缺少上下文 contextToken ，无法发送消息。请先让对方给你发一条消息。" }
@@ -1192,15 +1222,12 @@ export const adapter = new class WeixinOCAdapter {
 
     while (Bot[botId] && !Bot[botId]._stop) {
       try {
-        const account = config.accounts.find(a => a.bot_id === botId)
-        const syncBuf = account?.sync_buf || ""
+        const wxData = await this.getWxData(botId)
+        const syncBuf = wxData.syncBuf || ""
         const result = await bot.client.getUpdates(syncBuf)
 
-        if (result.get_updates_buf && account) {
-          if (account.sync_buf !== result.get_updates_buf) {
-            account.sync_buf = result.get_updates_buf
-            this.configSaveDebounced(account.user_id)
-          }
+        if (result.get_updates_buf) {
+          await this.setWxData(botId, "syncBuf", result.get_updates_buf)
         }
         errorCount = 0;
 
@@ -1268,9 +1295,16 @@ export const adapter = new class WeixinOCAdapter {
       return { needLogin: true, client }
     }
 
+    // 从 Redis 获取当前账号的 syncBuf
+    let syncBuf = ""
+    if (accountConfig?.bot_id) {
+      const wxData = await this.getWxData(accountConfig.bot_id)
+      syncBuf = wxData.syncBuf
+    }
+
     // 验证 token 是否有效 (通过调用 getUpdates)
     try {
-      await client.getUpdates(accountConfig.sync_buf || "")
+      await client.getUpdates(syncBuf || "")
     } catch (err) {
       const errorMsg = err.stack || err.message || String(err)
       if (config.debug)
@@ -1341,6 +1375,15 @@ export const adapter = new class WeixinOCAdapter {
 
     let needSave = false
     for (const account of config.accounts || []) {
+
+      // 兼容性清理：如果 Config 存在这三个属性则删掉并标记需保存以瘦身 // TODO: 下个月删除此段代码
+      if ("sync_buf" in account || "context_token" in account || "context_tokens" in account) {
+        delete account.sync_buf
+        delete account.context_token
+        delete account.context_tokens
+        needSave = true
+      }
+
       const botId = account.bot_id
       // 跳过已连接的账号
       if (Bot[botId] && !Bot[botId]._stop) {
@@ -1448,7 +1491,6 @@ export const adapter = new class WeixinOCAdapter {
               account_id: status.ilink_bot_id,
               user_id: status.ilink_user_id,
               nickname: status.nickname || status.ilink_user_id,
-              sync_buf: "",
             }
             config.accounts.push(accountConfig)
           }
