@@ -856,7 +856,12 @@ export const adapter = new class WeixinOCAdapter {
 
     Bot[botId].fl.set(data.user_id, data.sender)
 
-    Bot.makeLog("info", `好友消息：[${data.sender.nickname}] ${this.makeLog(raw_message)}`, botId)
+    Bot.makeLog(
+      "info",
+      `好友消息：[${data.sender.nickname}] ${this.makeLog(raw_message)}`,
+      `${data.self_id} <= ${data.user_id}`,
+      true
+    )
     Bot.em(`${data.post_type}.${data.message_type}`, data)
   }
 
@@ -1007,7 +1012,7 @@ export const adapter = new class WeixinOCAdapter {
               image_item: { media, mid_size: fileSize },
             })
           } catch (err) {
-            logger.error("上传图片失败:", err)
+            Bot.makeLog("error", `上传图片失败: ${err.message}`, `${data.self_id} => ${data.user_id}`, true)
             itemList.push({ type: 1, text_item: { text: "[图片上传失败]" } })
           }
           break
@@ -1022,7 +1027,7 @@ export const adapter = new class WeixinOCAdapter {
               video_item: { media, video_size: fileSize },
             })
           } catch (err) {
-            logger.error("上传视频失败:", err)
+            Bot.makeLog("error", `上传视频失败: ${err.message}`, `${data.self_id} => ${data.user_id}`, true)
             itemList.push({ type: 1, text_item: { text: "[视频上传失败]" } })
           }
           break
@@ -1041,7 +1046,7 @@ export const adapter = new class WeixinOCAdapter {
               },
             })
           } catch (err) {
-            logger.error("上传文件失败:", err)
+            Bot.makeLog("error", `上传文件失败: ${err.message}`, `${data.self_id} => ${data.user_id}`, true)
             itemList.push({ type: 1, text_item: { text: "[文件上传失败]" } })
           }
           break
@@ -1061,7 +1066,7 @@ export const adapter = new class WeixinOCAdapter {
               },
             })
           } catch (err) {
-            logger.error("转发语音为文件失败:", err)
+            Bot.makeLog("error", `转发语音为文件失败: ${err.message}`, `${data.self_id} => ${data.user_id}`, true)
             itemList.push({ type: 1, text_item: { text: "[语音上传失败]" } })
           }
           break
@@ -1104,27 +1109,42 @@ export const adapter = new class WeixinOCAdapter {
 
     const { itemList, msgs, forward } = await this.makeMsg(data, msg)
     const normalizedForward = this._normalizeForwardEntries(forward, data.raw_message)
-    Bot.makeLog("info", `发送好友消息：[${data.user_id}] ${this.makeLog(msgs)}`, botId, true)
+
+    Bot.makeLog(
+      "info",
+      `发送好友消息：${this.makeLog(msgs)}`,
+      `${data.self_id} => ${data.user_id}`,
+      true
+    )
 
     // 从 Redis 缓存中读取 contextToken
     const wxData = await this.getWxData(botId)
     const contextToken = wxData.contextToken
     if (!contextToken) {
-      Bot.makeLog("error", "缺少上下文 contextToken ，无法发送消息。请先让对方给你发一条消息。", botId)
+      Bot.makeLog(
+        "error",
+        "缺少上下文 contextToken，无法发送消息。请先让对方给你发一条消息。",
+        `${data.self_id} => ${data.user_id}`,
+        true
+      )
       return { error: "缺少上下文 contextToken ，无法发送消息。请先让对方给你发一条消息。" }
     }
 
     if (!itemList.length && !normalizedForward.length) {
       const reason = "empty_or_unsupported_message"
-      Bot.makeLog("info", `跳过空消息发送：[${data.user_id}] ${reason} types=${segmentTypes.join(",")}`, botId, true)
+      Bot.makeLog(
+        "info",
+        `跳过空消息发送：${reason} types=${segmentTypes.join(",")}`,
+        `${data.self_id} => ${data.user_id}`,
+        true
+      )
       return { data: { skipped: true, reason, segment_types: segmentTypes } }
     }
 
     try {
       // 1. 只有合并转发消息 (没有普通图文)
       if (!itemList.length) {
-        if (config.debug)
-          logger.mark(`发送转发兼容消息: count=${normalizedForward.length}`)
+        if (config.debug) logger.mark(`发送转发兼容消息: count=${normalizedForward.length}`)
         const forwardResult = await Bot.sendForwardMsg(msg => this.sendFriendMsg(data, msg), normalizedForward)
         // 取转发消息的第一条 result
         const firstResult = (Array.isArray(forwardResult) && forwardResult.length > 0) ? forwardResult[0] : {}
@@ -1134,19 +1154,17 @@ export const adapter = new class WeixinOCAdapter {
       }
 
       // 2. 发送普通消息
-      if (config.debug)
-        logger.mark("发送消息 itemList:", this._debugStringify(itemList))
+      if (config.debug) logger.mark("发送消息 itemList:", this._debugStringify(itemList))
+
       const result = await Bot[botId].client.sendMessage(userId, itemList, contextToken)
 
       // 兼容云崽加个时间戳
       result.time ??= Date.now();
-      if (config.debug)
-        logger.mark("发送消息结果:", result)
+      if (config.debug) logger.mark("发送消息结果:", result)
 
       // 3. 混合消息场景：发完普通消息后，还带有合并转发节点
       if (normalizedForward.length) {
-        if (config.debug)
-          logger.mark(`发送转发兼容消息: count=${normalizedForward.length}`)
+        if (config.debug) logger.mark(`发送转发兼容消息: count=${normalizedForward.length}`)
         const forwardResult = await Bot.sendForwardMsg(msg => this.sendFriendMsg(data, msg), normalizedForward)
 
         // 混合消息的第一条必定是普通消息的 result，所以把 result 展开在最外层
@@ -1156,7 +1174,7 @@ export const adapter = new class WeixinOCAdapter {
       // 4. 只有普通消息
       return result
     } catch (err) {
-      Bot.makeLog("error", `发送消息失败: ${err.message}`, botId)
+      Bot.makeLog("error", `发送消息失败: ${err.message}`, `${data.self_id} => ${data.user_id}`, true)
       return { error: err.message }
     }
   }
@@ -1259,7 +1277,7 @@ export const adapter = new class WeixinOCAdapter {
             message: "微信 Token 已过期或在其他设备登录，账号已下线",
             tag: "账号下线"
           }
-          Bot.makeLog("info", `[${eventData.self_id}] ${eventData.tag || "账号下线"}: ${err.message}`, botId)
+          Bot.makeLog("info", `${eventData.tag || "账号下线"}：${err.message}`, botId)
           Bot.sendMasterMsg(`[${eventData.self_id}] ${eventData.tag || "账号下线"}：${eventData.message}`)
           Bot.em(`${eventData.post_type}.${eventData.notice_type}.${eventData.sub_type}`, eventData)
 
