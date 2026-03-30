@@ -17,6 +17,9 @@ export const { config, configSave } = await makeConfig("WeixinOC", {
   qr_poll_interval: 2000,  // 二维码轮询间隔(ms)
   long_poll_timeout: 35000,  // 长轮询超时(ms)
   api_timeout: 15000,  // API 超时(ms)
+  typing_keepalive_interval: 5000, // e.send_typing() 重复续期“正在输入”间隔(ms)
+  typing_ticket_ttl: 60000,        // ticket 有效期(ms)
+  typing_ttl_time: 180000,        // e.send_typing() 的“正在输入”状态持续时间(ms)
   // 账号配置 (扫码登录后会自动保存)
   accounts: [],  // { bot_id, token, account_id, user_id, nickname }
   debug: false,
@@ -241,6 +244,31 @@ class WeixinClient {
     if (!response.ok) throw new Error(`CDN download failed: ${response.status}`)
     return Buffer.from(await response.arrayBuffer())
   }
+
+  // 获取正在输入配置 (获取 ticket)
+  async getTypingConfig(userId, contextToken) {
+    return this.request("POST", "ilink/bot/getconfig", {
+      body: {
+        ilink_user_id: userId,
+        context_token: contextToken,
+        base_info: { channel_version: "yunzai" },
+      },
+      tokenRequired: true,
+    });
+  }
+
+  // 发送正在输入状态
+  async sendTypingState(userId, typingTicket, cancel = false) {
+    return this.request("POST", "ilink/bot/sendtyping", {
+      body: {
+        ilink_user_id: userId,
+        typing_ticket: typingTicket,
+        status: cancel ? 2 : 1, // 1: 正在输入, 2: 取消
+        base_info: { channel_version: "yunzai" },
+      },
+      tokenRequired: true,
+    });
+  }
 }
 
 // 适配器实现
@@ -260,6 +288,8 @@ export const adapter = new class WeixinOCAdapter {
     this._messageStore = new Map()
     // 防止重复加载
     this._loaded = false
+    /** Map<botId:userId, { ticket, timer, expire, owners: Set }> */
+    this._typingStates = new Map();
   }
 
   /**
@@ -768,6 +798,102 @@ export const adapter = new class WeixinOCAdapter {
     return { message, raw_message: rawMessage.join(" ") }
   }
 
+  // Bot 发送“正在输入”状态
+  async startTyping(botId, userId) {
+    const bot = Bot[botId];
+    if (!bot) return;
+
+    const key = `${botId}:${userId}`;
+    let state = this._typingStates.get(key);
+
+    // 如果该用户已经在“正在输入”状态中，直接增加一个 owner 并返回 // 这里的 owner 机制防止多个插件同时触发冲突
+    if (state) {
+      const ownerId = crypto.randomUUID().slice(0, 8);
+      state.owners.add(ownerId);
+      return ownerId;
+    }
+
+    const ownerId = crypto.randomUUID().slice(0, 8);
+    state = {
+      ticket: null,
+      timer: null,
+      autoStopTimer: null,
+      /** ticket 自身的过期时间 */
+      expire: 0,
+      owners: new Set([ownerId])
+    };
+    this._typingStates.set(key, state);
+
+    const perform = async () => {
+      try {
+        const wxData = await this.getWxData(botId);
+        const contextToken = wxData.contextToken;
+        if (!contextToken) return;
+
+        // 如果没有 ticket 或已过期(typing_ticket_ttl)，则重新获取
+        if (!state.ticket || Date.now() > state.expire) {
+          const res = await bot.client.getTypingConfig(userId.replace(/^wx_/, ""), contextToken);
+          state.ticket = res.typing_ticket;
+          state.expire = Date.now() + config.typing_ticket_ttl;
+        }
+
+        if (state.ticket) {
+          await bot.client.sendTypingState(userId.replace(/^wx_/, ""), state.ticket, false);
+        }
+      } catch (err) {
+        logger.error(`[微信个人号] 发送正在输入状态失败: ${err.message}`);
+      }
+    };
+
+    // 立即执行一次
+    await perform();
+
+    // 启动每 5 秒一次的“正在输入”状态续期（防止微信端自动消失）
+    state.timer = setInterval(perform, config.typing_keepalive_interval);
+
+    // 设置 typing_ttl_time 毫秒后强制停止
+    state.autoStopTimer = setTimeout(() => {
+      this.stopTyping(botId, userId, null);
+    }, config.typing_ttl_time);
+
+    return ownerId;
+  }
+
+  /**
+   * @description: Bot 停止“正在输入”状态
+   * @param {*} botId
+   * @param {*} userId
+   * @param {*} ownerId 如果传入了 ownerId，则只删除对应的触发源，如果没有指定 ownerId (强制停止) 或者所有触发源都已结束
+   * @return {*}
+   */
+  async stopTyping(botId, userId, ownerId = null) {
+    const key = `${botId}:${userId}`;
+    const state = this._typingStates.get(key);
+    if (!state) return;
+
+    if (ownerId) {
+      state.owners.delete(ownerId);
+    }
+    if (ownerId === null || state.owners.size === 0) {
+      if (state.timer) {
+        clearInterval(state.timer);
+        state.timer = null;
+      }
+      if (state.autoStopTimer) {
+        clearTimeout(state.autoStopTimer);
+        state.autoStopTimer = null;
+      }
+
+      if (state.ticket) {
+        try {
+          const bot = Bot[botId];
+          await bot.client.sendTypingState(userId.replace(/^wx_/, ""), state.ticket, true);
+        } catch (e) { }
+      }
+      this._typingStates.delete(key);
+    }
+  }
+
   // 构建 Yunzai 消息接收的 e 数据
   async makeMessage(botId, msg) {
     const fromUserId = msg.from_user_id
@@ -833,7 +959,16 @@ export const adapter = new class WeixinOCAdapter {
       original_raw_message: raw_message,
     }
 
-    // 注入 getReply 函数，完美兼容你的代码 e.getReply(e.reply_id)
+    // 注入正在输入函数
+    data.send_typing = async () => {
+      return await this.startTyping(botId, data.user_id);
+    };
+
+    data.stop_typing = async (ownerId) => {
+      return await this.stopTyping(botId, data.user_id, ownerId);
+    };
+
+    // 注入 getReply 函数，兼容 e.getReply(e.reply_id)
     data.getReply = async (replyId = data.reply_id) => {
       if (!replyId) return null;
       return this._getCachedMessage(botId, replyId);
@@ -1101,7 +1236,6 @@ export const adapter = new class WeixinOCAdapter {
   // 发送好友消息
   async sendFriendMsg(data, msg) {
     const botId = data.self_id
-    const userId = data.user_id.replace(/^wx_/, "")
     const segmentTypes = (Array.isArray(msg) ? msg : [msg]).map(item => {
       if (typeof item !== "object" || item === null) return typeof item
       return item.type || "object"
@@ -1142,6 +1276,9 @@ export const adapter = new class WeixinOCAdapter {
     }
 
     try {
+      // 停止该用户的“正在输入”状态
+      this.stopTyping(botId, data.user_id);
+
       // 1. 只有合并转发消息 (没有普通图文)
       if (!itemList.length) {
         if (config.debug) logger.mark(`发送转发兼容消息: count=${normalizedForward.length}`)
@@ -1156,7 +1293,7 @@ export const adapter = new class WeixinOCAdapter {
       // 2. 发送普通消息
       if (config.debug) logger.mark("发送消息 itemList:", this._debugStringify(itemList))
 
-      const result = await Bot[botId].client.sendMessage(userId, itemList, contextToken)
+      const result = await Bot[botId].client.sendMessage(data.user_id.replace(/^wx_/, ""), itemList, contextToken)
 
       // 兼容云崽加个时间戳
       result.time ??= Date.now();
@@ -1201,7 +1338,8 @@ export const adapter = new class WeixinOCAdapter {
     return this._getCachedMessage(data.self_id, message_id)
   }
 
-  async getFriendMsgHistory(data, message_seq, count = 1) {
+  async getFriendMsgHistory(data, message_seq, count = 1, reverseOrder = true) {
+    // TODO: 如果Wechat开放获取对话历史记录API再重构此函数, 目前仅返回空数组
     const message = this._getCachedMessage(data.self_id, message_seq)
     if (!message) return []
     return Array.from({ length: Math.max(1, count) }, () => message).slice(0, 1)
