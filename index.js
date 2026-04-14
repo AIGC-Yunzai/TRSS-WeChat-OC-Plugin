@@ -1372,8 +1372,15 @@ export const adapter = new class WeixinOCAdapter {
       // 4. 只有普通消息
       return sendResults.length > 1 ? { ...result, data: { message: sendResults } } : result
     } catch (err) {
-      Bot.makeLog("error", `发送消息失败: ${err.message}`, `${data.self_id} => ${data.user_id}`, true)
-      return { error: err.message }
+      if (config.debug) logger.mark(`发送消息异常: ${err.message}`);
+
+      let errMsg = err.message
+      if (errMsg.includes("ret=-2")) {
+        errMsg = "上下文 contextToken 已过期，请先让对方给你发一条消息。"
+      }
+
+      Bot.makeLog("error", `发送消息失败: ${errMsg}`, `${data.self_id} => ${data.user_id}`, true)
+      return { error: errMsg }
     }
   }
 
