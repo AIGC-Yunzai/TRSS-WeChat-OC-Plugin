@@ -1335,7 +1335,7 @@ export const adapter = new class WeixinOCAdapter {
       // 2. 发送普通消息
       Bot.makeLog(
         "info",
-        `发送好友消息[最终]：${this.makeLog(messageBatches)}`,
+        `发送好友消息：${this.makeLog(messageBatches)}`,
         `${data.self_id} => ${data.user_id}`,
         true
       )
