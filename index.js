@@ -293,14 +293,13 @@ export const adapter = new class WeixinOCAdapter {
   }
 
   /**
-   * Redis 缓存获取 contextToken 和 syncBuf
+   * Redis 缓存获取 syncBuf
    */
   async getWxData(botId) {
-    if (!botId) return { syncBuf: "", contextToken: "" }
-    const data = { syncBuf: "", contextToken: "" }
+    if (!botId) return { syncBuf: "" }
+    const data = { syncBuf: "" }
     try {
       data.syncBuf = (await redis.hGet(`WeixinOC:data:${botId}`, "sync_buf")) || ""
-      data.contextToken = (await redis.hGet(`WeixinOC:data:${botId}`, "context_token")) || ""
     } catch (err) {
       logger.error(`[微信个人号] ${botId} Redis 读取失败: ${err.message}`)
     }
@@ -315,10 +314,7 @@ export const adapter = new class WeixinOCAdapter {
     const data = await this.getWxData(botId)
 
     if (data[key] !== value) {
-      const keyMap = {
-        contextToken: "context_token",
-        syncBuf: "sync_buf"
-      }
+      const keyMap = { syncBuf: "sync_buf" }
       const redisKey = keyMap[key]
       if (!redisKey) return logger.warn(`[微信个人号][setWxData] 未识别的 Key: ${key}`);
 
@@ -328,6 +324,116 @@ export const adapter = new class WeixinOCAdapter {
         logger.error(`[微信个人号] Redis 写入失败: ${err.message}`)
       }
     }
+  }
+
+  // ==================== Token 池管理 ====================
+  // 每个 context_token 有 10 次发送额度，24 小时有效期（iLink 协议限制）
+  // 按 botId:userId 维度存储，FIFO 顺序消费（优先用旧 token 防过期浪费）
+
+  _tokenPoolKey(botId, userId) {
+    return `WeixinOC:tokens:${botId}:${userId}`
+  }
+
+  async _getTokenPool(botId, userId) {
+    try {
+      const raw = await redis.get(this._tokenPoolKey(botId, userId))
+      if (!raw) return []
+      return JSON.parse(raw)
+    } catch {
+      return []
+    }
+  }
+
+  async _saveTokenPool(botId, userId, pool) {
+    const key = this._tokenPoolKey(botId, userId)
+    if (!pool.length) {
+      await redis.del(key)
+      return
+    }
+    await redis.set(key, JSON.stringify(pool))
+    await redis.expire(key, 25 * 60 * 60)
+  }
+
+  _pruneTokenPool(pool) {
+    const now = Date.now()
+    const TTL = 24 * 60 * 60 * 1000
+    return pool.filter(t => t.used < 10 && (now - t.time) < TTL)
+  }
+
+  /**
+   * 将新 token 追加到用户的 token 池
+   */
+  async addToken(botId, userId, token) {
+    if (!botId || !userId || !token) return
+    let pool = await this._getTokenPool(botId, userId)
+    if (pool.some(t => t.token === token)) return
+    pool.push({ token, used: 0, time: Date.now() })
+    pool = this._pruneTokenPool(pool)
+    await this._saveTokenPool(botId, userId, pool)
+    if (config.debug) {
+      const remaining = pool.reduce((sum, t) => sum + (10 - t.used), 0)
+      logger.mark(`[Token池] +1 token (${botId}) pool=${pool.length} 剩余额度=${remaining}`)
+    }
+  }
+
+  /**
+   * 消费一个 token（used+1），返回 token 字符串；无可用则返回 null
+   */
+  async consumeToken(botId, userId) {
+    if (!botId || !userId) return null
+    let pool = await this._getTokenPool(botId, userId)
+    pool = this._pruneTokenPool(pool)
+    const entry = pool.find(t => t.used < 10)
+    if (!entry) {
+      await this._saveTokenPool(botId, userId, pool)
+      return null
+    }
+    entry.used++
+    await this._saveTokenPool(botId, userId, pool)
+    return entry.token
+  }
+
+  /**
+   * 查看是否有可用 token（不消费），用于前置检查和 typing
+   */
+  async peekToken(botId, userId) {
+    if (!botId || !userId) return null
+    const pool = this._pruneTokenPool(await this._getTokenPool(botId, userId))
+    const entry = pool.find(t => t.used < 10)
+    return entry ? entry.token : null
+  }
+
+  /**
+   * 标记指定 token 为已耗尽（used=10）
+   */
+  async exhaustToken(botId, userId, token) {
+    if (!botId || !userId || !token) return
+    let pool = await this._getTokenPool(botId, userId)
+    const entry = pool.find(t => t.token === token)
+    if (entry) entry.used = 10
+    pool = this._pruneTokenPool(pool)
+    await this._saveTokenPool(botId, userId, pool)
+  }
+
+  /**
+   * 发送单个消息批次，遇到 ret:-2 自动切换 token 重试
+   */
+  async _sendBatchWithRetry(botId, userId, batch, maxRetries = 3) {
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const token = await this.consumeToken(botId, userId)
+      if (!token) throw new Error("TOKEN_POOL_EMPTY")
+      try {
+        return await Bot[botId].client.sendMessage(userId, batch, token)
+      } catch (err) {
+        if (err.message?.includes("ret=-2")) {
+          await this.exhaustToken(botId, userId, token)
+          if (config.debug) logger.mark(`[Token池] token 已耗尽，尝试下一个 (${attempt + 1}/${maxRetries})`)
+          continue
+        }
+        throw err
+      }
+    }
+    throw new Error("TOKEN_POOL_EXHAUSTED")
   }
 
   /**
@@ -826,8 +932,7 @@ export const adapter = new class WeixinOCAdapter {
 
     const perform = async () => {
       try {
-        const wxData = await this.getWxData(botId);
-        const contextToken = wxData.contextToken;
+        const contextToken = await this.peekToken(botId, userId.replace(/^wx_/, ""));
         if (!contextToken) return;
 
         // 如果没有 ticket 或已过期(typing_ticket_ttl)，则重新获取
@@ -919,9 +1024,9 @@ export const adapter = new class WeixinOCAdapter {
     // 将引用消息缓存下来供云崽 e.getReply 方法调用
     if (quotedSource) this._cacheMessage(botId, quotedSource)
 
-    // 保存上下文 token (用于回复) 到 Redis 缓存中
+    // 将 context_token 追加到该用户的 token 池（每个 token 有 10 次发送额度）
     if (msg.context_token) {
-      await this.setWxData(botId, "contextToken", msg.context_token)
+      await this.addToken(botId, fromUserId, msg.context_token)
     }
 
     const accountInfo = config.accounts.find(a => a.bot_id === botId)
@@ -1284,6 +1389,7 @@ export const adapter = new class WeixinOCAdapter {
   // 发送好友消息
   async sendFriendMsg(data, msg) {
     const botId = data.self_id
+    const userId = data.user_id.replace(/^wx_/, "")
     const segmentTypes = (Array.isArray(msg) ? msg : [msg]).map(item => {
       if (typeof item !== "object" || item === null) return typeof item
       return item.type || "object"
@@ -1292,19 +1398,6 @@ export const adapter = new class WeixinOCAdapter {
     const { itemList, msgs, forward } = await this.makeMsg(data, msg)
     const normalizedForward = this._normalizeForwardEntries(forward, data.raw_message)
     const messageBatches = this._splitMessageItemList(itemList)
-
-    // 从 Redis 缓存中读取 contextToken
-    const wxData = await this.getWxData(botId)
-    const contextToken = wxData.contextToken
-    if (!contextToken) {
-      Bot.makeLog(
-        "error",
-        "缺少上下文 contextToken，无法发送消息。请先让对方给你发一条消息。",
-        `${data.self_id} => ${data.user_id}`,
-        true
-      )
-      return { error: "缺少上下文 contextToken ，无法发送消息。请先让对方给你发一条消息。" }
-    }
 
     if (!messageBatches.length && !normalizedForward.length) {
       const reason = "empty_or_unsupported_message"
@@ -1315,6 +1408,18 @@ export const adapter = new class WeixinOCAdapter {
         true
       )
       return { data: { skipped: true, reason, segment_types: segmentTypes } }
+    }
+
+    // 从 token 池中检查是否有可用 token
+    const hasToken = await this.peekToken(botId, userId)
+    if (!hasToken) {
+      Bot.makeLog(
+        "error",
+        "没有可用的 context_token，无法发送消息。请先让对方给你发一条消息。",
+        `${data.self_id} => ${data.user_id}`,
+        true
+      )
+      return { error: "没有可用的 context_token，无法发送消息。请先让对方给你发一条消息。" }
     }
 
     try {
@@ -1347,11 +1452,7 @@ export const adapter = new class WeixinOCAdapter {
       const sendResults = []
       for (const batch of messageBatches) {
         sendResults.push(
-          await Bot[botId].client.sendMessage(
-            data.user_id.replace(/^wx_/, ""),
-            batch,
-            contextToken,
-          ),
+          await this._sendBatchWithRetry(botId, userId, batch),
         )
       }
       const result = sendResults[0] || {}
@@ -1375,8 +1476,10 @@ export const adapter = new class WeixinOCAdapter {
       if (config.debug) logger.mark(`发送消息异常: ${err.message}`);
 
       let errMsg = err.message
-      if (errMsg.includes("ret=-2")) {
-        errMsg = "上下文 contextToken 已过期，请先让对方给你发一条消息。"
+      if (errMsg === "TOKEN_POOL_EMPTY" || errMsg === "TOKEN_POOL_EXHAUSTED") {
+        errMsg = "所有 context_token 已耗尽，无法发送消息。请等待对方发送新消息以获取额度。"
+      } else if (errMsg.includes("ret=-2")) {
+        errMsg = "context_token 已失效，请等待对方发送新消息。"
       }
 
       Bot.makeLog("error", `发送消息失败: ${errMsg}`, `${data.self_id} => ${data.user_id}`, true)
