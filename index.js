@@ -326,10 +326,6 @@ export const adapter = new class WeixinOCAdapter {
     }
   }
 
-  // ==================== Token 池管理 ====================
-  // 每个 context_token 有 10 次发送额度，24 小时有效期（iLink 协议限制）
-  // 按 botId:userId 维度存储，FIFO 顺序消费（优先用旧 token 防过期浪费）
-
   _tokenPoolKey(botId, userId) {
     return `WeixinOC:tokens:${botId}:${userId}`
   }
@@ -416,7 +412,14 @@ export const adapter = new class WeixinOCAdapter {
   }
 
   /**
-   * 发送单个消息批次，遇到 ret:-2 自动切换 token 重试
+   * @description: 轮询 context_token 发送消息；
+   * 每个 context_token 有 10 次发送额度，24 小时有效期（iLink 协议限制）；
+   * 按 botId:userId 维度存储，FIFO 顺序消费（优先用旧 token 防过期浪费）
+   * @param {*} botId
+   * @param {*} userId
+   * @param {*} batch
+   * @param {*} maxRetries
+   * @return {*}
    */
   async _sendBatchWithRetry(botId, userId, batch, maxRetries = 3) {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
