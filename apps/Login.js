@@ -1,5 +1,9 @@
 import plugin from '../../../lib/plugins/plugin.js'
 import common from '../../../lib/common/common.js';
+import {
+    config,
+    configSave,
+} from '../model/Config.js';
 
 export class WeixinOC extends plugin {
     constructor() {
@@ -24,6 +28,11 @@ export class WeixinOC extends plugin {
                     permission: 'master'
                 },
                 {
+                    reg: "^#微信(个人号)?(禁用|解禁|启用).+$",
+                    fnc: "ToggleDisable",
+                    permission: 'master'
+                },
+                {
                     reg: "^#微信(个人号)?(设置|修改)昵称.*$",
                     fnc: "SetNickname"
                 },
@@ -33,31 +42,78 @@ export class WeixinOC extends plugin {
 
     // 登录
     async Login() {
-        const { adapter, config, configSave, } = await import('../index.js')
+        const { adapter } = await import('../index.js')
         await adapter.startLogin(this.e)
     }
 
     // 列表
     async List() {
-        const { adapter, config, configSave, } = await import('../index.js')
+        const { adapter } = await import('../index.js')
         const accounts = config.accounts || []
         if (accounts.length === 0) {
             this.reply("没有已保存的微信账号，请使用 #微信个人号登录", true)
             return
         }
 
-        const list = accounts.map((a, i) => `${i + 1}. ${a.nickname || a.user_id}\n e.user_id: wx_${a.user_id}\n Bot.uin: ${a.bot_id}`)
+        const list = accounts.map((account, i) => `${i + 1}. ${account.nickname || account.user_id}${account.isDisable ? ' (已失效)' : ''}\n e.user_id: wx_${account.user_id}\n Bot.uin: ${account.bot_id}`)
         const online = []
         for (const [id, bot] of adapter.bots) {
             if (!bot._stop) online.push(`${id}:wx_${bot.info.user_id}`)
         }
 
-        this.e.reply(await common.makeForwardMsg(this.e, ["已保存的账号：", ...list, "已登录的账号：", ...online, "可用指令：\n #微信个人号登录\n #微信个人号删除[序号]\n #微信个人号列表\n #微信个人号设置昵称[序号]"], this.e.msg));
+        this.e.reply(await common.makeForwardMsg(this.e, ["已保存的账号：", ...list, "已登录的账号：", ...online, "可用指令：\n #微信个人号登录\n #微信个人号删除[序号]\n #微信个人号列表\n #微信个人号设置昵称[序号]\n #微信个人号禁用/启用[序号]"], this.e.msg));
+    }
+
+    // 禁用/启用账号
+    async ToggleDisable() {
+        const { adapter } = await import('../index.js')
+        const isEnable = /解禁|启用/.test(this.e.msg)
+        const action = isEnable ? '启用' : '禁用'
+        const input = this.e.msg.replace(/^#微信(个人号)?(禁用|解禁|启用)/, "").trim()
+
+        // 先立即保存任何待保存的配置
+        await configSave()
+        if (adapter._pendingSave) adapter._pendingSave.clear()
+
+        let targetAccount = null
+        const index = parseInt(input) - 1
+
+        if (!isNaN(index) && index >= 0 && index < config.accounts.length) {
+            targetAccount = config.accounts[index]
+        } else {
+            targetAccount = config.accounts.find(a => a.user_id === input || a.nickname === input || a.bot_id === input)
+        }
+
+        if (!targetAccount) {
+            this.reply("未找到指定账号，请使用 #微信个人号列表", true)
+            return
+        }
+
+        targetAccount.isDisable = !isEnable
+        await configSave()
+
+        if (isEnable) {
+            this.reply(`已${action}账号: ${targetAccount.nickname || targetAccount.user_id}，正在尝试连接...`, true)
+            const result = await adapter.connect(targetAccount)
+            if (result && result.success) {
+                this.reply(`✅已${action}并连接成功: ${targetAccount.nickname || targetAccount.user_id}`, true)
+            } else if (result?.needLogin) {
+                this.reply(`⚠️已${action}，但凭证已失效，请使用 #微信个人号登录 重新扫码`, true)
+                // 重新标记为禁用，因为凭证失效了
+                targetAccount.isDisable = true
+                await configSave()
+            } else {
+                this.reply(`❌${action}失败: ${result?.error || '未知错误'}`, true)
+            }
+        } else {
+            await adapter.destroyBot(targetAccount.bot_id)
+            this.reply(`✅已${action}账号: ${targetAccount.nickname || targetAccount.user_id}`, true)
+        }
     }
 
     // 删除账号
     async Remove() {
-        const { adapter, config, configSave, } = await import('../index.js')
+        const { adapter } = await import('../index.js')
         const input = this.e.msg.replace(/^#微信(个人号)?(删除|移除)/, "").trim()
 
         // 先立即保存任何待保存的配置

@@ -1,35 +1,14 @@
 logger.info(logger.yellow("- 正在加载 微信个人号 适配器插件"))
 
-import makeConfig from "../../lib/plugins/config.js"
 import fetch from "node-fetch"
 import crypto from "crypto"
 import fs from "fs"
 import path from "path"
 import QRCode from "qrcode"
-
-// 默认配置
-export const { config, configSave } = await makeConfig("WeixinOC", {
-  tips: "",
-  // 微信 ilink API 配置
-  base_url: "https://ilinkai.weixin.qq.com",
-  cdn_base_url: "https://novac2c.cdn.weixin.qq.com/c2c",
-  bot_type: "3",  // 机器人类型
-  qr_poll_interval: 2000,  // 二维码轮询间隔(ms)
-  long_poll_timeout: 35000,  // 长轮询超时(ms)
-  api_timeout: 15000,  // API 超时(ms)
-  typing_keepalive_interval: 5000, // e.send_typing() 重复续期“正在输入”间隔(ms)
-  typing_ticket_ttl: 60000,        // ticket 有效期(ms)
-  typing_ttl_time: 180000,        // e.send_typing() 的“正在输入”状态持续时间(ms)
-  // 账号配置 (扫码登录后会自动保存)
-  accounts: [],  // { bot_id, token, account_id, user_id, nickname }
-  debug: false,
-}, {
-  tips: [
-    "欢迎使用 TRSS-Yunzai 微信个人号适配器插件!",
-    "使用 #微信个人号登录 进行扫码登录",
-    "主页: https://github.com/AIGC-Yunzai/TRSS-WeChat-OC-Plugin",
-  ],
-})
+import {
+  config,
+  configSave,
+} from './model/Config.js';
 
 // 工具函数：AES 加密/解密
 const AESUtils = {
@@ -1465,13 +1444,16 @@ export const adapter = new class WeixinOCAdapter {
         if (err.message?.includes("401") || err.message?.includes("403") || err.message?.includes("ret=100") || err.message?.includes("invalid token") || err.message?.includes("errcode=-14") || err.message?.includes("session timeout")) {
           // 清除失效的 Token
           const account = config.accounts.find(a => a.bot_id === botId)
-          if (account) {
+          if (account && bot.client.token === account.token) {
             account.token = ""
+            account.isDisable = true
             this.configSaveDebounced(account.user_id)
           }
 
-          // 彻底销毁 Bot 实例
-          await this.destroyBot(botId)
+          // 只有当当前的 Bot 还是自己时，才执行销毁
+          if (Bot[botId] === bot) {
+            await this.destroyBot(botId)
+          }
 
           // 账号下线通知
           const eventData = {
@@ -1614,6 +1596,10 @@ export const adapter = new class WeixinOCAdapter {
         Bot.makeLog("info", `微信账号已在连接中: ${account.nickname || account.user_id}`, "WeixinOC")
         continue
       }
+      if (account.isDisable) {
+        Bot.makeLog("info", `微信账号已失效，跳过连接: ${account.nickname || account.user_id}`, "WeixinOC")
+        continue
+      }
       if (account.token) {
         Bot.makeLog("info", `正在连接微信账号: ${account.nickname || account.user_id}`, "WeixinOC")
         const result = await this.connect(account)
@@ -1622,6 +1608,7 @@ export const adapter = new class WeixinOCAdapter {
         if (result?.needLogin) {
           Bot.makeLog("mark", `微信账号 [${account.nickname || account.user_id}] 登录凭证已失效，请发送 #微信个人号登录 重新扫码！(原因: ${result.error})`, "WeixinOC")
           account.token = ""
+          account.isDisable = true
           needSave = true
         } else {
           await Bot.sleep(2000) // 错峰加载
@@ -1704,9 +1691,15 @@ export const adapter = new class WeixinOCAdapter {
           if (existing) {
             existing.token = status.bot_token
             existing.account_id = status.ilink_bot_id
-            existing.nickname = status.nickname || status.ilink_user_id
+            existing.nickname = existing.nickname || status.nickname || status.ilink_user_id
+            existing.isDisable = false
             if (!existing.bot_id) existing.bot_id = this._getNextBotId()
             botId = existing.bot_id
+
+            // 如果旧的 bot 实例还在运行，先销毁它
+            if (Bot[botId]) {
+              await this.destroyBot(botId)
+            }
           } else {
             botId = this._getNextBotId()
             const accountConfig = {
