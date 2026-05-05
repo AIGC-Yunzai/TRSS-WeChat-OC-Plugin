@@ -10,7 +10,7 @@ export function supportGuoba() {
   return {
     pluginInfo: {
       name: 'WeChat-OC-Plugin',
-      title: '微信个人号适配器插件',
+      title: '微信个人号适配器',
       author: ['@ethan42nd', '@Misaka20002', '@eggacheb'],
       authorLink: ['https://github.com/ethan42nd', 'https://github.com/Misaka20002', 'https://github.com/eggacheb'],
       link: 'https://github.com/AIGC-Yunzai/TRSS-WeChat-OC-Plugin',
@@ -74,7 +74,7 @@ export function supportGuoba() {
               },
               {
                 component: "Divider",
-                label: "↓不推荐修改下面的配置↓",
+                label: "↓不推荐修改以下配置↓",
                 componentProps: {
                   orientation: "left",
                   plain: true,

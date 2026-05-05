@@ -55,13 +55,20 @@ export class WeixinOC extends plugin {
             return
         }
 
-        const list = accounts.map((account, i) => `${i + 1}. ${account.nickname || account.user_id}${account.isDisable ? ' (已失效)' : ''}\n e.user_id: wx_${account.user_id}\n Bot.uin: ${account.bot_id}`)
-        const online = []
-        for (const [id, bot] of adapter.bots) {
-            if (!bot._stop) online.push(`${id}:wx_${bot.info.user_id}`)
-        }
+        const list = accounts.map((account, i) => {
+            let status = '已离线'
+            if (account.isDisable) {
+                status = '已失效/禁用'
+            } else {
+                const bot = adapter.bots.get(account.bot_id)
+                if (bot && !bot._stop) {
+                    status = '已登录'
+                }
+            }
+            return `${i + 1}. ${account.nickname || "未设置昵称"} [${status}]:\n ${account.bot_id}:wx_${account.user_id}`
+        })
 
-        this.e.reply(await common.makeForwardMsg(this.e, ["已保存的账号：", ...list, "已登录的账号：", ...online, "可用指令：\n #微信个人号登录\n #微信个人号删除[序号]\n #微信个人号列表\n #微信个人号设置昵称[序号]\n #微信个人号禁用/启用[序号]"], this.e.msg));
+        this.e.reply(await common.makeForwardMsg(this.e, ["微信账号列表：", ...list, "可用指令：\n #微信个人号登录\n #微信个人号列表\n #微信个人号删除[序号]\n #微信个人号禁用/启用[序号]\n #微信个人号设置昵称[序号]"], this.e.msg));
     }
 
     // 禁用/启用账号
