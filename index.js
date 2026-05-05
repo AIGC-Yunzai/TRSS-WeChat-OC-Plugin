@@ -1646,14 +1646,14 @@ export const adapter = new class WeixinOCAdapter {
       if (config.debug)
         logger.mark("二维码响应:", qrcodeData)
     } catch (err) {
-      e.reply(`获取二维码失败: ${err.message}`)
+      e.reply(`获取二维码失败: ${err.message}`, true)
       return false
     }
 
     const qrcode = qrcodeData.qrcode
     const qrcodeUrl = qrcodeData.qrcode_img_content
     if (!qrcode || !qrcodeUrl) {
-      e.reply("获取二维码失败: 返回数据缺少二维码内容")
+      e.reply("获取二维码失败: 返回数据缺少二维码内容", true)
       logger.error("QRCode response:", qrcodeData)
       return false
     }
@@ -1669,9 +1669,9 @@ export const adapter = new class WeixinOCAdapter {
 
     // 3. 发送二维码
     if (qrImage) {
-      await e.reply(["请使用微信扫码登录:", segment.image(`base64://${qrImage}`)])
+      await e.reply(["请使用微信扫码登录:", segment.image(`base64://${qrImage}`)], true, { recallMsg: 115 })
     } else {
-      await e.reply(`请使用微信扫码登录，或手动访问:\n${qrcodeUrl}`)
+      await e.reply(`请使用微信扫码登录，或手动访问:\n${qrcodeUrl}`, true, { recallMsg: 115 })
     }
 
     // 给后台运维或纯命令行服务器使用的链接
@@ -1725,12 +1725,12 @@ export const adapter = new class WeixinOCAdapter {
           }))
 
           if (result.success) {
-            e.reply(`微信登录成功:\n e.nickname: ${currentAccount.nickname}\n e.user_id: wx_${currentAccount.user_id}\n Bot.uin: ${currentAccount.bot_id}\n\n可用指令:\n #微信个人号列表\n #微信个人号设置昵称`)
+            e.reply(`微信登录成功:\n e.nickname: ${currentAccount.nickname}\n e.user_id: wx_${currentAccount.user_id}\n Bot.uin: ${currentAccount.bot_id}\n\n可用指令:\n #微信个人号列表\n #微信个人号设置昵称`, true)
           }
           return true
 
         } else if (status.status === "expired") {
-          e.reply("二维码已过期，请重新登录")
+          e.reply("二维码已过期，请重新登录", true)
           return false
         }
       } catch (err) {
@@ -1740,7 +1740,7 @@ export const adapter = new class WeixinOCAdapter {
       }
     }
 
-    e.reply("登录超时，请重新尝试")
+    e.reply("登录超时，请重新尝试", true)
     return false
   }
 }
