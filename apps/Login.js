@@ -152,7 +152,7 @@ export class WeixinOC extends plugin {
 
     // 设置/修改昵称
     async SetNickname() {
-        const { adapter, config, configSave } = await import('../index.js')
+        const { adapter } = await import('../index.js')
 
         // 判断指令是否来源于微信个人号 (根据 adapter.id 判断)
         const isWechat = this.e.bot?.version?.id === "WeixinOC"
