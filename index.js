@@ -254,7 +254,7 @@ class WeixinClient {
 export const adapter = new class WeixinOCAdapter {
   id = "WeixinOC"
   name = "微信个人号"
-  version = "v1.0.0"
+  version = "v1.0.1"
 
   constructor() {
     // 存储 bot 实例

@@ -1,6 +1,6 @@
 {
   "name": "trss-wechat-oc-plugin",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Yunzai adapter plugin for WeChat personal account via ilink protocol",
   "main": "index.js",
   "type": "module",
