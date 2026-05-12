@@ -73,6 +73,13 @@ export function supportGuoba() {
                 bottomHelpMessage: "凭证失效或主动禁用时开启",
               },
               {
+                field: "allow_download",
+                label: "允许下载文件",
+                component: "Switch",
+                required: false,
+                bottomHelpMessage: "开启后将允许Bot下载用户发送的文件并传递 base64://..",
+              },
+              {
                 component: "Divider",
                 label: "↓不推荐修改以下配置↓",
                 componentProps: {

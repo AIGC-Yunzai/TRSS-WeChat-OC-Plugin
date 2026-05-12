@@ -659,11 +659,28 @@ export const adapter = new class WeixinOCAdapter {
         const fileKey = item.file_item?.media?.encrypt_query_param
         if (!fileKey || mediaSet.has(fileKey)) continue
         mediaSet.add(fileKey)
-        quoteMessage.push({
-          type: "file",
-          name: item.file_item?.file_name || "file",
-          url: fileKey,
-        })
+
+        const accountInfo = config.accounts.find(a => a.bot_id === botId)
+        if (accountInfo?.allow_download) {
+          const fileBuffer = await this._decodeInboundMedia(botId, item, "file_item")
+          if (fileBuffer) {
+            const b64 = `base64://${fileBuffer.toString("base64")}`
+            quoteMessage.push({
+              type: "file",
+              name: item.file_item?.file_name || "file",
+              url: b64,
+              file: b64
+            })
+          } else {
+            quoteMessage.push({ type: "text", text: "[引用文件下载失败]" })
+          }
+        } else {
+          quoteMessage.push({
+            type: "file",
+            name: item.file_item?.file_name || "file",
+            url: fileKey,
+          })
+        }
         quoteRawParts.push("[引用文件]")
         continue
       }
@@ -744,11 +761,27 @@ export const adapter = new class WeixinOCAdapter {
           break
 
         case 4: // 文件
-          message.push({
-            type: "file",
-            name: item.file_item?.file_name || "file",
-            url: item.file_item?.media?.encrypt_query_param,
-          })
+          const dlAccount = config.accounts.find(a => a.bot_id === botId)
+          if (dlAccount?.allow_download) {
+            const fileBuffer = await this._decodeInboundMedia(botId, item, "file_item")
+            if (fileBuffer) {
+              const b64 = `base64://${fileBuffer.toString("base64")}`
+              message.push({
+                type: "file",
+                name: item.file_item?.file_name || "file",
+                url: b64,
+                file: b64
+              })
+            } else {
+              message.push({ type: "text", text: "[文件下载失败]" })
+            }
+          } else {
+            message.push({
+              type: "file",
+              name: item.file_item?.file_name || "file",
+              url: item.file_item?.media?.encrypt_query_param,
+            })
+          }
           rawMessage.push("[文件]")
           break
 
