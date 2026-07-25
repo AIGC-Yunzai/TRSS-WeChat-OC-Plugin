@@ -2,13 +2,19 @@ logger.info(logger.yellow("- 正在加载 微信个人号 适配器插件"))
 
 import fetch from "node-fetch"
 import crypto from "crypto"
-import fs from "fs"
-import path from "path"
 import QRCode from "qrcode"
 import {
   config,
   configSave,
 } from './model/Config.js';
+import {
+  describeMediaRef,
+  detectMediaFormat,
+  resolveMediaRef,
+  sanitizeMediaLogText,
+} from "./model/Media.js"
+import { WeixinStateStore } from "./model/StateStore.js"
+import { processUpdateBatch } from "./model/UpdateProcessor.js"
 
 // 工具函数：AES 加密/解密
 const AESUtils = {
@@ -189,7 +195,7 @@ class WeixinClient {
 
     if (config.debug) {
       logger.mark(`CDN上传: rawSize=${fileBuffer.length}, paddedSize=${paddedData.length}, encryptedSize=${encrypted.length}`)
-      logger.mark(`CDN上传: aesKeyHex=${aesKeyHex.slice(0, 16)}..., keyLength=${key.length}`)
+      logger.mark(`CDN上传: aesKeyHex=[redacted], keyLength=${key.length}`)
     }
 
     let url
@@ -269,44 +275,38 @@ export const adapter = new class WeixinOCAdapter {
     this._loaded = false
     /** Map<botId:userId, { ticket, timer, expire, owners: Set }> */
     this._typingStates = new Map();
+    this._stateStore = new WeixinStateStore(redis, logger)
   }
 
   /**
-   * Redis 缓存获取 contextToken 和 syncBuf
+   * Redis 缓存获取 syncBuf
    */
   async getWxData(botId) {
-    if (!botId) return { syncBuf: "", contextToken: "" }
-    const data = { syncBuf: "", contextToken: "" }
-    try {
-      data.syncBuf = (await redis.hGet(`WeixinOC:data:${botId}`, "sync_buf")) || ""
-      data.contextToken = (await redis.hGet(`WeixinOC:data:${botId}`, "context_token")) || ""
-    } catch (err) {
-      logger.error(`[微信个人号] ${botId} Redis 读取失败: ${err.message}`)
-    }
-    return data
+    return { syncBuf: await this._stateStore.getSyncBuf(botId) }
   }
 
   /**
-   * 更新并写入 Redis 缓存 (仅当发生改变时)
+   * 更新并写入 Redis syncBuf (仅当发生改变时)
    */
   async setWxData(botId, key, value) {
-    if (!botId || !value) return
-    const data = await this.getWxData(botId)
+    if (key !== "syncBuf") return logger.warn(`[微信个人号][setWxData] 未识别的 Key: ${key}`)
+    return this._stateStore.setSyncBuf(botId, value)
+  }
 
-    if (data[key] !== value) {
-      const keyMap = {
-        contextToken: "context_token",
-        syncBuf: "sync_buf"
-      }
-      const redisKey = keyMap[key]
-      if (!redisKey) return logger.warn(`[微信个人号][setWxData] 未识别的 Key: ${key}`);
+  async getContextToken(botId, userId) {
+    return this._stateStore.getContextToken(botId, userId)
+  }
 
-      try {
-        await redis.hSet(`WeixinOC:data:${botId}`, redisKey, value)
-      } catch (err) {
-        logger.error(`[微信个人号] Redis 写入失败: ${err.message}`)
-      }
-    }
+  async setContextToken(botId, userId, contextToken) {
+    return this._stateStore.setContextToken(botId, userId, contextToken)
+  }
+
+  async clearContextToken(botId, userId) {
+    return this._stateStore.clearContextToken(botId, userId)
+  }
+
+  async clearWxData(botId) {
+    return this._stateStore.clearBotState(botId)
   }
 
   /**
@@ -335,18 +335,7 @@ export const adapter = new class WeixinOCAdapter {
   }
 
   _sanitizeLogString(text) {
-    return String(text)
-      .replace(/encrypt_query_param=[^&\s"]*/g, "encrypt_query_param=...")
-      .replace(/base64:\/\/[A-Za-z0-9+/=]+/g, value => this._summarizeBase64String(value))
-  }
-
-  _summarizeBase64String(value) {
-    if (typeof value !== "string" || !value.startsWith("base64://")) return value
-    const base64 = value.slice("base64://".length)
-    const preview = base64.slice(0, 16)
-    let bytes = 0
-    try { bytes = Buffer.from(base64, "base64").length } catch { }
-    return `base64://${preview}... [bytes=${bytes}]`
+    return sanitizeMediaLogText(text)
   }
 
   _sanitizeDebugValue(value, seen = new WeakSet()) {
@@ -357,7 +346,11 @@ export const adapter = new class WeixinOCAdapter {
     if (Array.isArray(value)) return value.map(item => this._sanitizeDebugValue(item, seen))
     const sanitized = {}
     for (const [key, item] of Object.entries(value)) {
-      sanitized[key] = this._sanitizeDebugValue(item, seen)
+      if (/^(authorization|token|bot_token|aes_?key|upload_param|upload_full_url|encrypt_query_param)$/i.test(key)) {
+        sanitized[key] = "[redacted]"
+      } else {
+        sanitized[key] = this._sanitizeDebugValue(item, seen)
+      }
     }
     return sanitized
   }
@@ -624,7 +617,15 @@ export const adapter = new class WeixinOCAdapter {
         const imageBuffer = await this._decodeInboundMedia(botId, item, "image_item")
         if (imageBuffer) {
           const b64 = `base64://${imageBuffer.toString("base64")}`
-          quoteMessage.push({ type: "image", url: b64 })
+          const mediaInfo = detectMediaFormat(imageBuffer, "image")
+          quoteMessage.push({
+            type: "image",
+            url: b64,
+            file: b64,
+            name: `image${mediaInfo.extension || ".jpg"}`,
+            mime_type: mediaInfo.mimeType,
+            file_size: imageBuffer.length,
+          })
         } else {
           quoteMessage.push({ type: "text", text: "[引用图片加载失败]" })
         }
@@ -646,7 +647,15 @@ export const adapter = new class WeixinOCAdapter {
           const voiceBuffer = await this._decodeInboundMedia(botId, item, "voice_item")
           if (voiceBuffer) {
             const b64 = `base64://${voiceBuffer.toString("base64")}`
-            quoteMessage.push({ type: "record", url: b64, file: b64 })
+            const mediaInfo = detectMediaFormat(voiceBuffer, "voice.silk")
+            quoteMessage.push({
+              type: "record",
+              url: b64,
+              file: b64,
+              name: `voice${mediaInfo.extension || ".silk"}`,
+              mime_type: mediaInfo.mimeType,
+              file_size: voiceBuffer.length,
+            })
           } else {
             quoteMessage.push({ type: "text", text: "[引用语音加载失败]" })
           }
@@ -665,11 +674,15 @@ export const adapter = new class WeixinOCAdapter {
           const fileBuffer = await this._decodeInboundMedia(botId, item, "file_item")
           if (fileBuffer) {
             const b64 = `base64://${fileBuffer.toString("base64")}`
+            const fileName = item.file_item?.file_name || "file"
+            const mediaInfo = detectMediaFormat(fileBuffer, fileName)
             quoteMessage.push({
               type: "file",
-              name: item.file_item?.file_name || "file",
+              name: fileName,
               url: b64,
-              file: b64
+              file: b64,
+              mime_type: mediaInfo.mimeType,
+              file_size: fileBuffer.length,
             })
           } else {
             quoteMessage.push({ type: "text", text: "[引用文件下载失败]" })
@@ -692,11 +705,14 @@ export const adapter = new class WeixinOCAdapter {
         const videoBuffer = await this._decodeInboundMedia(botId, item, "video_item")
         if (videoBuffer) {
           const b64 = `base64://${videoBuffer.toString("base64")}`
+          const mediaInfo = detectMediaFormat(videoBuffer, "video.mp4")
           quoteMessage.push({
             type: "video",
             url: b64,
-            file: "video.mp4",
-            file_name: "video.mp4",
+            file: b64,
+            name: `video${mediaInfo.extension || ".mp4"}`,
+            file_name: `video${mediaInfo.extension || ".mp4"}`,
+            mime_type: mediaInfo.mimeType,
             file_size: item.video_item?.video_size || videoBuffer.length
           })
         } else {
@@ -735,7 +751,15 @@ export const adapter = new class WeixinOCAdapter {
           const imageBuffer = await this._decodeInboundMedia(botId, item, "image_item")
           if (imageBuffer) {
             const b64 = `base64://${imageBuffer.toString("base64")}`
-            message.push({ type: "image", url: b64, file: b64 })
+            const mediaInfo = detectMediaFormat(imageBuffer, "image")
+            message.push({
+              type: "image",
+              url: b64,
+              file: b64,
+              name: `image${mediaInfo.extension || ".jpg"}`,
+              mime_type: mediaInfo.mimeType,
+              file_size: imageBuffer.length,
+            })
           } else {
             message.push({ type: "text", text: "[图片加载失败]" })
           }
@@ -752,7 +776,15 @@ export const adapter = new class WeixinOCAdapter {
             const voiceBuffer = await this._decodeInboundMedia(botId, item, "voice_item")
             if (voiceBuffer) {
               const b64 = `base64://${voiceBuffer.toString("base64")}`
-              message.push({ type: "record", file: b64, url: b64 })
+              const mediaInfo = detectMediaFormat(voiceBuffer, "voice.silk")
+              message.push({
+                type: "record",
+                file: b64,
+                url: b64,
+                name: `voice${mediaInfo.extension || ".silk"}`,
+                mime_type: mediaInfo.mimeType,
+                file_size: voiceBuffer.length,
+              })
             } else {
               message.push({ type: "text", text: "[语音加载失败]" })
             }
@@ -766,11 +798,15 @@ export const adapter = new class WeixinOCAdapter {
             const fileBuffer = await this._decodeInboundMedia(botId, item, "file_item")
             if (fileBuffer) {
               const b64 = `base64://${fileBuffer.toString("base64")}`
+              const fileName = item.file_item?.file_name || "file"
+              const mediaInfo = detectMediaFormat(fileBuffer, fileName)
               message.push({
                 type: "file",
-                name: item.file_item?.file_name || "file",
+                name: fileName,
                 url: b64,
-                file: b64
+                file: b64,
+                mime_type: mediaInfo.mimeType,
+                file_size: fileBuffer.length,
               })
             } else {
               message.push({ type: "text", text: "[文件下载失败]" })
@@ -789,11 +825,14 @@ export const adapter = new class WeixinOCAdapter {
           const videoBuffer = await this._decodeInboundMedia(botId, item, "video_item")
           if (videoBuffer) {
             const b64 = `base64://${videoBuffer.toString("base64")}`
+            const mediaInfo = detectMediaFormat(videoBuffer, "video.mp4")
             message.push({
               type: "video",
               url: b64,
-              file: "video.mp4",
-              file_name: "video.mp4",
+              file: b64,
+              name: `video${mediaInfo.extension || ".mp4"}`,
+              file_name: `video${mediaInfo.extension || ".mp4"}`,
+              mime_type: mediaInfo.mimeType,
               file_size: item.video_item?.video_size || videoBuffer.length
             })
           } else {
@@ -828,6 +867,7 @@ export const adapter = new class WeixinOCAdapter {
     const ownerId = crypto.randomUUID().slice(0, 8);
     state = {
       ticket: null,
+      contextToken: null,
       timer: null,
       autoStopTimer: null,
       /** ticket 自身的过期时间 */
@@ -838,14 +878,14 @@ export const adapter = new class WeixinOCAdapter {
 
     const perform = async () => {
       try {
-        const wxData = await this.getWxData(botId);
-        const contextToken = wxData.contextToken;
+        const contextToken = await this.getContextToken(botId, userId.replace(/^wx_/, ""));
         if (!contextToken) return;
 
         // 如果没有 ticket 或已过期(typing_ticket_ttl)，则重新获取
-        if (!state.ticket || Date.now() > state.expire) {
+        if (!state.ticket || state.contextToken !== contextToken || Date.now() > state.expire) {
           const res = await bot.client.getTypingConfig(userId.replace(/^wx_/, ""), contextToken);
           state.ticket = res.typing_ticket;
+          state.contextToken = contextToken;
           state.expire = Date.now() + config.typing_ticket_ttl;
         }
 
@@ -916,12 +956,6 @@ export const adapter = new class WeixinOCAdapter {
     const dedupKey = `${botId}:${messageId}:${clientId}`
     if (this._messageCache.has(dedupKey)) return
 
-    // 限制去重缓存容量
-    this._messageCache.set(dedupKey, Date.now())
-    while (this._messageCache.size > 500) {
-      this._messageCache.delete(this._messageCache.keys().next().value)
-    }
-
     const { message, raw_message } = await this._parseItemList(botId, msg.item_list)
 
     // 从CDN获取引用消息的内容
@@ -931,9 +965,9 @@ export const adapter = new class WeixinOCAdapter {
     // 将引用消息缓存下来供云崽 e.getReply 方法调用
     if (quotedSource) this._cacheMessage(botId, quotedSource)
 
-    // 保存上下文 token (用于回复) 到 Redis 缓存中
+    // 按用户保存上下文 token，避免不同会话互相覆盖。
     if (msg.context_token) {
-      await this.setWxData(botId, "contextToken", msg.context_token)
+      await this.setContextToken(botId, fromUserId, msg.context_token)
     }
 
     const accountInfo = config.accounts.find(a => a.bot_id === botId)
@@ -1010,83 +1044,42 @@ export const adapter = new class WeixinOCAdapter {
       true
     )
     Bot.em(`${data.post_type}.${data.message_type}`, data)
+
+    // 只有消息成功完成解析并投递后才进入去重缓存，失败重试时不能提前跳过。
+    this._messageCache.set(dedupKey, Date.now())
+    while (this._messageCache.size > 500) {
+      this._messageCache.delete(this._messageCache.keys().next().value)
+    }
   }
 
   // 上传文件到微信 CDN
-  async uploadMedia(botId, file, toUserId = "") {
+  async uploadMedia(botId, file, toUserId = "", options = {}) {
     const bot = Bot[botId]
     if (!bot) throw new Error("Bot not found")
 
-    // 获取文件 buffer
-    let fileBuffer
-    let fileName = "file"
-
-    if (Buffer.isBuffer(file)) {
-      fileBuffer = file
-    } else if (typeof file === "string") {
-      if (file.startsWith("http")) {
-        // 下载网络文件
-        const response = await fetch(file)
-        fileBuffer = Buffer.from(await response.arrayBuffer())
-        fileName = path.basename(new URL(file).pathname) || "file"
-      } else if (file.startsWith("base64://")) {
-        // 处理 base64 格式的媒体数据
-        const base64Data = file.replace(/^base64:\/\//, "")
-        fileBuffer = Buffer.from(base64Data, "base64")
-        fileName = "base64_file"
-      } else if (file.startsWith("file://")) {
-        // 兼容 file:// 协议的文件路径
-        const filePath = file.replace(/^file:\/\//, "")
-        fileBuffer = fs.readFileSync(filePath)
-        fileName = path.basename(filePath)
-      } else {
-        // 本地文件
-        fileBuffer = fs.readFileSync(file)
-        fileName = path.basename(file)
-      }
+    const maxBytes = Math.max(Number(config.media_max_size_mb) || 100, 1) * 1024 * 1024
+    let resolved
+    try {
+      resolved = await resolveMediaRef(file, {
+        timeoutMs: config.api_timeout,
+        maxBytes,
+        fileName: options.fileName,
+      })
+    } catch (error) {
+      const reason = error?.code || sanitizeMediaLogText(error?.message || "unknown error")
+      throw new Error(`媒体解析失败 (${describeMediaRef(file)}): ${reason}`)
     }
+    const fileBuffer = resolved.buffer
+    const fileName = resolved.fileName
 
     const fileKey = crypto.randomUUID().replace(/-/g, "")
     const aesKeyHex = crypto.randomUUID().replace(/-/g, "")
     const rawMd5 = crypto.createHash("md5").update(fileBuffer).digest("hex")
     const cipherSize = fileBuffer.length + (16 - (fileBuffer.length % 16) || 16)
 
-    // 判断媒体类型 - 优先通过文件内容检测
-    let mediaType = 3  // 文件
-    let itemType = 4
-
-    // 尝试通过文件扩展名判断
-    const ext = path.extname(fileName).toLowerCase()
-    if ([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"].includes(ext)) {
-      mediaType = 1
-      itemType = 2
-    } else if ([".mp4", ".avi", ".mov", ".mkv", ".flv"].includes(ext)) {
-      mediaType = 2
-      itemType = 5
-    }
-
-    // 文件头魔数检测加强
-    if (itemType === 4 && fileBuffer.length > 4) {
-      // 检查文件魔数
-      const header = fileBuffer.subarray(0, 4).toString("hex")
-      if (header.startsWith("ffd8ff")) {  // JPEG
-        mediaType = 1
-        itemType = 2
-        fileName = "image.jpg"
-      } else if (header.startsWith("89504e47")) {  // PNG
-        mediaType = 1
-        itemType = 2
-        fileName = "image.png"
-      } else if (header.startsWith("47494638")) {  // GIF
-        mediaType = 1
-        itemType = 2
-        fileName = "image.gif"
-      } else if (header.startsWith("52494646") || header.startsWith("57454250")) {  // WEBP
-        mediaType = 1
-        itemType = 2
-        fileName = "image.webp"
-      }
-    }
+    // 消息段的语义决定上传类型，文件内容仅用于校验格式与保留扩展名。
+    const expectedKind = options.kind || resolved.kind
+    const mediaType = expectedKind === "image" ? 1 : expectedKind === "video" ? 2 : 3
 
     // 获取上传 URL
     const uploadUrlRes = await bot.client.getUploadUrl({
@@ -1102,7 +1095,7 @@ export const adapter = new class WeixinOCAdapter {
     })
 
     if (config.debug)
-      logger.mark("getUploadUrl 响应:", uploadUrlRes)
+      logger.mark("getUploadUrl 响应:", this._debugStringify(uploadUrlRes))
 
     const uploadParam = uploadUrlRes.upload_param
     const uploadFullUrl = uploadUrlRes.upload_full_url
@@ -1111,11 +1104,11 @@ export const adapter = new class WeixinOCAdapter {
     const encryptedParam = await bot.client.uploadToCdn(uploadFullUrl, uploadParam, fileKey, aesKeyHex, fileBuffer)
 
     if (config.debug)
-      logger.mark("CDN 上传返回 encryptedParam:", encryptedParam?.slice(0, 50) + "...")
+      logger.mark(`CDN 上传返回 encryptedParam: [redacted], length=${encryptedParam?.length || 0}`)
 
     const aesKeyB64 = Buffer.from(aesKeyHex, "utf8").toString("base64")
     if (config.debug)
-      logger.mark(`aes_key base64: ${aesKeyB64.slice(0, 40)}..., length=${aesKeyB64.length}`)
+      logger.mark(`aes_key base64: [redacted], length=${aesKeyB64.length}`)
 
     return {
       media: {
@@ -1125,6 +1118,9 @@ export const adapter = new class WeixinOCAdapter {
       },
       fileSize: cipherSize,
       rawSize: fileBuffer.length,
+      fileName,
+      mimeType: resolved.mimeType,
+      format: resolved.format,
     }
   }
 
@@ -1137,8 +1133,17 @@ export const adapter = new class WeixinOCAdapter {
     const source = typeof file === "string" ? file : name
     const normalized = String(source).toLowerCase()
 
-    if (normalized.startsWith("base64://")) return "image"
+    if (normalized.startsWith("base64://")) {
+      try {
+        const mediaInfo = detectMediaFormat(Buffer.from(String(file).slice(9), "base64"), name)
+        if (mediaInfo.kind === "video") return "video"
+        if (mediaInfo.kind === "audio") return "record"
+      } catch { }
+      return "image"
+    }
     if (normalized.startsWith("data:image/")) return "image"
+    if (normalized.startsWith("data:video/")) return "video"
+    if (normalized.startsWith("data:audio/")) return "record"
     if (/\.(png|jpe?g|gif|webp|bmp|svg)(\?|#|$)/.test(normalized)) return "image"
     if (/\.(mp4|mov|m4v|webm|avi|mkv)(\?|#|$)/.test(normalized)) return "video"
     if (/\.(mp3|wav|ogg|aac|m4a|amr|silk)(\?|#|$)/.test(normalized)) return "record"
@@ -1196,7 +1201,12 @@ export const adapter = new class WeixinOCAdapter {
         case "image":
           try {
             const userId = data.user_id?.replace(/^wx_/, "") || ""
-            const { media, fileSize } = await this.uploadMedia(data.self_id, i.data.file || i.data.url, userId)
+            const { media, fileSize } = await this.uploadMedia(
+              data.self_id,
+              i.data.file || i.data.url,
+              userId,
+              { kind: "image", fileName: i.data.name || i.data.file_name },
+            )
             msgs.push({ type: "image", ...i.data })
             itemList.push({
               type: 2,
@@ -1211,7 +1221,12 @@ export const adapter = new class WeixinOCAdapter {
         case "video":
           try {
             const userId = data.user_id?.replace(/^wx_/, "") || ""
-            const { media, fileSize } = await this.uploadMedia(data.self_id, i.data.file || i.data.url, userId)
+            const { media, fileSize } = await this.uploadMedia(
+              data.self_id,
+              i.data.file || i.data.url,
+              userId,
+              { kind: "video", fileName: i.data.name || i.data.file_name },
+            )
             msgs.push({ type: "video", ...i.data })
             itemList.push({
               type: 5,
@@ -1226,13 +1241,18 @@ export const adapter = new class WeixinOCAdapter {
         case "file":
           try {
             const userId = data.user_id?.replace(/^wx_/, "") || ""
-            const { media, rawSize } = await this.uploadMedia(data.self_id, i.data.file || i.data.url, userId)
+            const { media, rawSize, fileName } = await this.uploadMedia(
+              data.self_id,
+              i.data.file || i.data.url,
+              userId,
+              { kind: "file", fileName: i.data.name || i.data.file_name },
+            )
             msgs.push({ type: "file", ...i.data })
             itemList.push({
               type: 4,
               file_item: {
                 media,
-                file_name: i.data.name || "file",
+                file_name: fileName,
                 len: String(rawSize),
               },
             })
@@ -1246,13 +1266,18 @@ export const adapter = new class WeixinOCAdapter {
           // 云崽传来的语音：因微信不支持随意格式发送语音块，将其作为文件发送给微信端
           try {
             const userId = data.user_id?.replace(/^wx_/, "") || ""
-            const { media, rawSize } = await this.uploadMedia(data.self_id, i.data.file || i.data.url, userId)
+            const { media, rawSize, fileName } = await this.uploadMedia(
+              data.self_id,
+              i.data.file || i.data.url,
+              userId,
+              { kind: "file", fileName: i.data.name || i.data.file_name || "voice_record" },
+            )
             msgs.push({ type: "record", ...i.data })
             itemList.push({
               type: 4,
               file_item: {
                 media,
-                file_name: "voice_record.mp3", // 大多数插件发来的是 mp3 或 amr
+                file_name: fileName,
                 len: String(rawSize),
               },
             })
@@ -1305,9 +1330,9 @@ export const adapter = new class WeixinOCAdapter {
     const normalizedForward = this._normalizeForwardEntries(forward, data.raw_message)
     const messageBatches = this._splitMessageItemList(itemList)
 
-    // 从 Redis 缓存中读取 contextToken
-    const wxData = await this.getWxData(botId)
-    const contextToken = wxData.contextToken
+    // 从 Redis 中读取目标用户自己的 contextToken。
+    const targetUserId = data.user_id.replace(/^wx_/, "")
+    const contextToken = await this.getContextToken(botId, targetUserId)
     if (!contextToken) {
       Bot.makeLog(
         "error",
@@ -1388,6 +1413,7 @@ export const adapter = new class WeixinOCAdapter {
 
       let errMsg = err.message
       if (errMsg.includes("ret=-2")) {
+        await this.clearContextToken(botId, targetUserId)
         errMsg = "上下文 contextToken 已过期，请先让对方给你发一条消息。"
       }
 
@@ -1461,17 +1487,14 @@ export const adapter = new class WeixinOCAdapter {
         const wxData = await this.getWxData(botId)
         const syncBuf = wxData.syncBuf || ""
         const result = await bot.client.getUpdates(syncBuf)
-
-        if (result.get_updates_buf) {
-          await this.setWxData(botId, "syncBuf", result.get_updates_buf)
-        }
         errorCount = 0;
 
-        // 处理消息
-        for (const msg of result.msgs || []) {
-          if (Bot[botId]?._stop) break
-          await this.makeMessage(botId, msg)
-        }
+        // 全部消息处理成功后再推进游标，避免处理中途失败造成消息永久丢失。
+        await processUpdateBatch(result, {
+          isStopped: () => !Bot[botId] || Bot[botId]._stop,
+          handleMessage: msg => this.makeMessage(botId, msg),
+          commitSyncBuf: nextSyncBuf => this.setWxData(botId, "syncBuf", nextSyncBuf),
+        })
       } catch (err) {
         // iLink API 返回的 Token 失效校验
         if (err.message?.includes("401") || err.message?.includes("403") || err.message?.includes("ret=100") || err.message?.includes("invalid token") || err.message?.includes("errcode=-14") || err.message?.includes("session timeout")) {

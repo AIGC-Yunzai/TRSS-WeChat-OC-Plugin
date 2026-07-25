@@ -4,6 +4,9 @@
   "description": "Yunzai adapter plugin for WeChat personal account via ilink protocol",
   "main": "index.js",
   "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
   "keywords": [
     "yunzai",
     "yunzai-bot",

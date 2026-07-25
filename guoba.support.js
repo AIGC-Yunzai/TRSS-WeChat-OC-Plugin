@@ -134,6 +134,19 @@ export function supportGuoba() {
           },
         },
         {
+          field: "media_max_size_mb",
+          label: "媒体大小上限",
+          helpMessage: "单位：MB",
+          bottomHelpMessage: "通过本地路径、Base64 或网络地址发送的单个媒体文件大小上限",
+          component: "InputNumber",
+          componentProps: {
+            min: 1,
+            max: 1024,
+            step: 1,
+            placeholder: 100,
+          },
+        },
+        {
           field: "debug",
           label: "debug 模式",
           component: "Switch",

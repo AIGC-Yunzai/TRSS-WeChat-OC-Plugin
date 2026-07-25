@@ -9,6 +9,7 @@ export const { config, configSave } = await makeConfig("WeixinOC", {
     qr_poll_interval: 2000,  // 二维码轮询间隔(ms)
     long_poll_timeout: 35000,  // 长轮询超时(ms)
     api_timeout: 15000,  // API 超时(ms)
+    media_max_size_mb: 100,  // 单个出站媒体最大大小(MB)
     typing_keepalive_interval: 5000, // e.send_typing() 重复续期“正在输入”间隔(ms)
     typing_ticket_ttl: 60000,        // ticket 有效期(ms)
     typing_ttl_time: 180000,        // e.send_typing() 的“正在输入”状态持续时间(ms)

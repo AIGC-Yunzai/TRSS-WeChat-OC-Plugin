@@ -132,6 +132,7 @@ export class WeixinOC extends plugin {
         if (!isNaN(index) && index >= 0 && index < config.accounts.length) {
             const removed = config.accounts.splice(index, 1)[0]
             await adapter.destroyBot(removed.bot_id)
+            await adapter.clearWxData(removed.bot_id)
             await configSave()
             this.reply(`已删除账号: ${removed.nickname || removed.user_id}`, true)
             return
@@ -142,6 +143,7 @@ export class WeixinOC extends plugin {
         if (found >= 0) {
             const removed = config.accounts.splice(found, 1)[0]
             await adapter.destroyBot(removed.bot_id)
+            await adapter.clearWxData(removed.bot_id)
             await configSave()
             this.reply(`已删除账号: ${removed.nickname || removed.user_id}`, true)
             return
