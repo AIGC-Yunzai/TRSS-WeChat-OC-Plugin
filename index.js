@@ -735,6 +735,7 @@ export const adapter = new class WeixinOCAdapter {
   async _parseItemList(botId, itemList) {
     const message = []
     const rawMessage = []
+    const seenImages = new Set() 
 
     for (const item of itemList || []) {
       const type = item.type
@@ -752,6 +753,8 @@ export const adapter = new class WeixinOCAdapter {
           const imageBuffer = await this._decodeInboundMedia(botId, item, "image_item")
           if (imageBuffer) {
             const b64 = `base64://${imageBuffer.toString("base64")}`
+            if (seenImages.has(b64)) break 
+            seenImages.add(b64)
             const mediaInfo = detectMediaFormat(imageBuffer, "image")
             message.push({
               type: "image",
@@ -1021,10 +1024,8 @@ export const adapter = new class WeixinOCAdapter {
       return this._getCachedMessage(botId, replyId);
     };
 
-    // 判断如果 img.length 为 0，则删掉 e.img
-    const img = this._extractImageUrls(message)
-    if (img && img.length > 0) data.img = img
-    else delete data.img
+    // 不预设 data.img，交由 Yunzai dealEvent 从 e.message 中自动构建
+    delete data.img
 
     this._cacheMessage(botId, data)
 
