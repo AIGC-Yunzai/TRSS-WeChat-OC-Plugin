@@ -1,5 +1,6 @@
 logger.info(logger.yellow("- 正在加载 微信个人号 适配器插件"))
 
+import fs from "fs"
 import fetch from "node-fetch"
 import crypto from "crypto"
 import QRCode from "qrcode"
